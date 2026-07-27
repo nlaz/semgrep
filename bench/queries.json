@@ -1,0 +1,45 @@
+{
+  "_comment": "Keyword queries run against every tool. NL queries run against bog's ranked modes only (bm25/semantic/hybrid) — grep-family tools get the 'nl_keywords' fallback, which simulates how an agent would translate the NL intent into a grep pattern.",
+  "linux": {
+    "keyword": [
+      {"name": "rare-literal", "pattern": "EXPORT_SYMBOL_GPL\\(kvm_get_running_vcpu\\)"},
+      {"name": "common-literal", "pattern": "kmalloc"},
+      {"name": "regex", "pattern": "static int [a-z_]+_suspend\\("},
+      {"name": "case-insensitive", "pattern": "PageDirty", "flags": ["-i"]}
+    ],
+    "nl": [
+      {"query": "where is the ext4 journal replayed after a crash", "nl_keywords": "journal replay"},
+      {"query": "code that computes the scheduler load average", "nl_keywords": "load average"},
+      {"query": "how are out of memory kills decided", "nl_keywords": "oom kill"},
+      {"query": "usb device enumeration after hotplug", "nl_keywords": "usb enumerate"}
+    ]
+  },
+  "vscode": {
+    "keyword": [
+      {"name": "rare-literal", "pattern": "registerSingleton\\(ITerminalService"},
+      {"name": "common-literal", "pattern": "onDidChangeConfiguration"},
+      {"name": "regex", "pattern": "class [A-Za-z]+Provider implements"},
+      {"name": "case-insensitive", "pattern": "quickpick", "flags": ["-i"]}
+    ],
+    "nl": [
+      {"query": "where does autosave get triggered after a delay", "nl_keywords": "autosave delay"},
+      {"query": "logic that decides which extensions to recommend", "nl_keywords": "extension recommend"},
+      {"query": "how the minimap renders the buffer preview", "nl_keywords": "minimap render"},
+      {"query": "keybinding conflicts resolution order", "nl_keywords": "keybinding resolve"}
+    ]
+  },
+  "wikipedia": {
+    "keyword": [
+      {"name": "rare-literal", "pattern": "photosynthesis"},
+      {"name": "common-literal", "pattern": "the"},
+      {"name": "regex", "pattern": "born in 1[89][0-9][0-9]"},
+      {"name": "case-insensitive", "pattern": "eiffel tower", "flags": ["-i"]}
+    ],
+    "nl": [
+      {"query": "how do plants turn sunlight into energy", "nl_keywords": "photosynthesis"},
+      {"query": "the war fought between the north and south of the united states", "nl_keywords": "civil war"},
+      {"query": "animals that carry their young in a pouch", "nl_keywords": "marsupial"},
+      {"query": "the mathematician who broke the enigma code", "nl_keywords": "turing enigma"}
+    ]
+  }
+}
