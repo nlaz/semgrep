@@ -20,6 +20,7 @@ Env contract (set by run.py):
 import fcntl
 import json
 import os
+import shlex
 import subprocess
 import sys
 import time
@@ -30,6 +31,11 @@ def main():
     tool = sys.argv[1]
     argv = sys.argv[2:]
     real = os.environ.get(f"LOCBENCH_REAL_{tool.upper()}")
+    # Per-condition engine flags (A/B): appended to the real invocation but
+    # never shown to the agent — its commands and the logged argv stay clean.
+    injected = ""
+    if real is not None and tool in ("semgrep", "search"):
+        injected = os.environ.get("LOCBENCH_SEMGREP_FLAGS", "")
     log_path = Path(os.environ["LOCBENCH_SHIM_LOG"])
     stdout_dir = Path(os.environ["LOCBENCH_STDOUT_DIR"])
 
@@ -45,8 +51,9 @@ def main():
         out, err, code, wall_ms = b"", (msg + "\n").encode(), 2, 0.0
     else:
         t0 = time.perf_counter()
+        run_argv = argv + shlex.split(injected) if injected else argv
         try:
-            proc = subprocess.run([real, *argv], capture_output=True, timeout=600)
+            proc = subprocess.run([real, *run_argv], capture_output=True, timeout=600)
             out, err, code = proc.stdout, proc.stderr, proc.returncode
         except subprocess.TimeoutExpired as e:
             out, err, code = e.stdout or b"", (e.stderr or b"") + b"\nshim: timeout after 600s\n", 124
@@ -67,6 +74,7 @@ def main():
             "ts": time.time(),
             "tool": tool,
             "blocked": blocked,
+            "injected": injected,
             "argv": argv,
             "cwd": os.getcwd(),
             "wall_ms": round(wall_ms, 1),

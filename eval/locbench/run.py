@@ -90,11 +90,40 @@ TOOL_LINES["both"] = (
     "Read and Glob are also available."
 )
 TOOL_LINES = {k: v + UNAVAILABLE for k, v in TOOL_LINES.items()}
+
+# v4 description (§7.3 winner: ranked-as-identity framing + micro-example).
+# Held FIXED across the §9.6 A/B engine conditions so the engine config is
+# the only variable; the agent never sees the injected flags.
+V4_LINE = (
+    "The only code search tool available is `semgrep`, a ranked hybrid "
+    "code search. Give it anything — an identifier, a phrase, or a "
+    "question: `semgrep \"query\" [path]` returns the k most relevant "
+    "locations as path:line:text (ranked top 10; `-k N` for more). "
+    "Example: semgrep \"where is the retry backoff computed\" → "
+    "src/net/retry.rs:142:fn backoff_delay(attempt: u32). Ranked, not "
+    "exhaustive — if the answer isn't there, rephrase. Use `semgrep -e "
+    "<regex>` for exact grep-style matching when you need every "
+    "occurrence. Read and Glob are also available."
+)
+
+# A/B engine conditions: name -> semgrep flags injected by the shim.
+# sg-sif additionally gets a --sif --sif-a 1e-4 index (built last per
+# instance since it replaces the worktree's .semgrep).
+SG_ENGINE_CONDITIONS = {
+    "sg-plain": "",
+    "sg-mx48": "--maxsim --maxsim-pool 48",
+    "sg-mx96": "--maxsim",
+    "sg-sif": "--maxsim",
+}
+for _name in SG_ENGINE_CONDITIONS:
+    TOOL_LINES[_name] = V4_LINE + UNAVAILABLE
+
 ALLOWED = {
     "rg": ["Bash(rg *)"],
     "semgrep": ["Bash(semgrep *)"],
     "search": ["Bash(search *)"],
     "both": ["Bash(rg *)", "Bash(semgrep *)"],
+    **{name: ["Bash(semgrep *)"] for name in SG_ENGINE_CONDITIONS},
 }
 
 PROMPT = """You are localizing where a change must be made in the repository at {tree}
@@ -180,20 +209,28 @@ def ensure_worktree(repo, sha):
     return tree, json.loads(meta_path.read_text())
 
 
-def ensure_index(tree, meta_path):
-    """Build .semgrep once per worktree (semgrep conditions); record cost."""
+def ensure_index(tree, meta_path, sif=False):
+    """Build .semgrep once per worktree (semgrep conditions); record cost.
+    `sif` selects the --sif --sif-a 1e-4 variant — a mismatched existing
+    index (normal vs sif) is rebuilt, so sif conditions should run last."""
     meta = json.loads(meta_path.read_text())
-    if (tree / ".semgrep").exists():
-        return {"built": False, "reused": True,
-                "build_wall_s": meta.get("index_build_s"), "index_mb": meta.get("index_mb")}
+    idx_meta = tree / ".semgrep" / "meta.json"
+    if idx_meta.exists():
+        if json.loads(idx_meta.read_text()).get("sif", False) == sif:
+            return {"built": False, "reused": True, "sif": sif,
+                    "build_wall_s": meta.get("index_build_s"),
+                    "index_mb": meta.get("index_mb")}
     t0 = time.perf_counter()
-    subprocess.run([str(SEMGREP), "index", str(tree)], check=True,
-                   capture_output=True, timeout=3600)
+    cmd = [str(SEMGREP), "index", str(tree)]
+    if sif:
+        cmd += ["--sif", "--sif-a", "0.0001"]
+    subprocess.run(cmd, check=True, capture_output=True, timeout=3600)
     build_s = round(time.perf_counter() - t0, 1)
     index_mb = round(sum(f.stat().st_size for f in (tree / ".semgrep").rglob("*") if f.is_file()) / 1e6, 1)
     meta.update(index_build_s=build_s, index_mb=index_mb)
     meta_path.write_text(json.dumps(meta))
-    return {"built": True, "reused": False, "build_wall_s": build_s, "index_mb": index_mb}
+    return {"built": True, "reused": False, "sif": sif,
+            "build_wall_s": build_s, "index_mb": index_mb}
 
 
 def remove_worktree(repo, sha):
@@ -235,6 +272,8 @@ def block_msgs(condition):
         "semgrep": "use `semgrep \"your query\"` for content search",
         "search": "use `search \"your query\"` for content search",
         "both": "use `rg` or `semgrep` for content search",
+        **{n: "use `semgrep \"your query\"` for content search"
+           for n in SG_ENGINE_CONDITIONS},
     }[condition]
     msgs = {f"LOCBENCH_BLOCKMSG_{t.upper()}":
             f"{t}: unavailable in this environment — {steer}"
@@ -305,10 +344,13 @@ def run_agent(instance, condition, tree, run_dir, args):
     # shimmed names fall through to shim.py's blocked path.
     if condition in ("rg", "both"):
         env["LOCBENCH_REAL_RG"] = RG
-    if condition in ("semgrep", "both"):
+    if condition in ("semgrep", "both") or condition in SG_ENGINE_CONDITIONS:
         env["LOCBENCH_REAL_SEMGREP"] = str(SEMGREP)
     if condition == "search":
         env["LOCBENCH_REAL_SEARCH"] = str(SEMGREP)
+    flags = SG_ENGINE_CONDITIONS.get(condition, "")
+    if flags:
+        env["LOCBENCH_SEMGREP_FLAGS"] = flags
     cmd = [
         CLAUDE, "-p", "--output-format", "stream-json", "--verbose",
         "--model", args.model,
@@ -427,8 +469,8 @@ def run_instance(instance, conditions, run_dir, args, emit):
     try:
         for condition in conditions:  # rg first by default: it must never see an index
             index = {"built": False, "reused": False, "build_wall_s": None, "index_mb": None}
-            if condition in ("semgrep", "both"):
-                index = ensure_index(tree, meta_path)
+            if condition in ("semgrep", "both") or condition in SG_ENGINE_CONDITIONS:
+                index = ensure_index(tree, meta_path, sif=(condition == "sg-sif"))
             index["present_during_run"] = (tree / ".semgrep").exists()
 
             status, answer, agent, search, harness_wall_s, transcript_rel, shim_log_rel = run_agent(
