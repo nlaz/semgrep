@@ -114,6 +114,10 @@ SG_ENGINE_CONDITIONS = {
     "sg-mx48": "--maxsim --maxsim-pool 48",
     "sg-mx96": "--maxsim",
     "sg-sif": "--maxsim",
+    # Retired candidates (results retained in eval/data/locbench/, analysis
+    # via table-ab.py): sg-code (code-distilled table, §10.6) and sg-fnchunk
+    # (tree-sitter function chunking, §11) both lost and were removed from
+    # the tree. sg-p256 became the shipped default, so it is now sg-plain.
 }
 for _name in SG_ENGINE_CONDITIONS:
     TOOL_LINES[_name] = V4_LINE + UNAVAILABLE
@@ -212,11 +216,16 @@ def ensure_worktree(repo, sha):
 def ensure_index(tree, meta_path, sif=False):
     """Build .semgrep once per worktree (semgrep conditions); record cost.
     `sif` selects the --sif --sif-a 1e-4 variant — a mismatched existing
-    index (normal vs sif) is rebuilt, so sif conditions should run last."""
+    index (normal vs sif) is rebuilt, so sif conditions should run last.
+    An index older than the binary is also rebuilt: a rebuilt binary may
+    embed different dims (e.g. a swapped embedding table), and reusing that
+    index makes every query bail on the dims check — which would look like
+    a catastrophic accuracy result rather than the mechanical mismatch it is."""
     meta = json.loads(meta_path.read_text())
     idx_meta = tree / ".semgrep" / "meta.json"
     if idx_meta.exists():
-        if json.loads(idx_meta.read_text()).get("sif", False) == sif:
+        fresh = idx_meta.stat().st_mtime >= SEMGREP.stat().st_mtime
+        if json.loads(idx_meta.read_text()).get("sif", False) == sif and fresh:
             return {"built": False, "reused": True, "sif": sif,
                     "build_wall_s": meta.get("index_build_s"),
                     "index_mb": meta.get("index_mb")}
