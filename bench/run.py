@@ -16,6 +16,8 @@ Generate the report with bench/report.py.
 
 import argparse
 import json
+import os
+import platform
 import re
 import shutil
 import statistics
@@ -80,8 +82,18 @@ def bench_cell(record, cmd, runs, warmup=1, cwd=None):
     samples = [measure(cmd, cwd=cwd) for _ in range(runs)]
     ok = [s for s in samples if s["wall"] is not None]
     record["runs"] = len(ok)
-    record["wall_s"] = round(statistics.median(s["wall"] for s in ok), 4)
-    record["wall_stdev"] = round(statistics.pstdev([s["wall"] for s in ok]), 4)
+    walls = sorted(s["wall"] for s in ok)
+    record["wall_s"] = round(statistics.median(walls), 4)
+    record["wall_stdev"] = round(statistics.pstdev(walls), 4)
+    # An agent feels the tail, not the median: a p99 that is 5x the median is
+    # a different product from one that tracks it, at the same median.
+    def _pct(q):
+        if not walls:
+            return None
+        return round(walls[min(len(walls) - 1, int(q * len(walls)))], 4)
+    record["wall_p50"], record["wall_p90"], record["wall_p99"] = (
+        _pct(0.50), _pct(0.90), _pct(0.99))
+    record["wall_min"], record["wall_max"] = round(walls[0], 4), round(walls[-1], 4)
     record["user_s"] = round(statistics.median(s["user"] or 0 for s in ok), 4)
     record["sys_s"] = round(statistics.median(s["sys"] or 0 for s in ok), 4)
     record["cpu_util"] = round(
@@ -91,6 +103,33 @@ def bench_cell(record, cmd, runs, warmup=1, cwd=None):
     record["peak_rss_mb"] = round(statistics.median(rss), 1) if rss else None
     record["exit"] = samples[-1]["exit"]
     return record
+
+
+def provenance():
+    """Enough to know whether two result sets are comparable at all. A
+    regression check across machines is meaningless, so record the machine."""
+    def sh(*c):
+        try:
+            return subprocess.run(c, capture_output=True, text=True,
+                                  timeout=10).stdout.strip() or None
+        except Exception:  # noqa: BLE001
+            return None
+    return {
+        "git_sha": sh("git", "-C", str(HERE.parent), "rev-parse", "--short", "HEAD"),
+        "git_dirty": bool(sh("git", "-C", str(HERE.parent), "status", "--porcelain")),
+        "binary_bytes": SEMGREP.stat().st_size if SEMGREP.exists() else None,
+        "machine": f"{platform.system()}-{platform.machine()}",
+        "cpu": sh("sysctl", "-n", "machdep.cpu.brand_string") or platform.processor(),
+        "cores": os.cpu_count(),
+        "ts": time.strftime("%Y-%m-%dT%H:%M:%S"),
+    }
+
+
+def dir_bytes(p):
+    p = Path(p)
+    if not p.is_dir():
+        return None
+    return sum(f.stat().st_size for f in p.rglob("*") if f.is_file())
 
 
 def main():
@@ -113,7 +152,18 @@ def main():
     results_path = outdir / "results.jsonl"
     results = []
 
+    prov = provenance()
+    print(f"build {prov['git_sha']}{'+dirty' if prov['git_dirty'] else ''} "
+          f"binary {(prov['binary_bytes'] or 0)/1e6:.1f}MB on {prov['machine']} "
+          f"({prov['cores']} cores)")
+
     def emit(rec):
+        rec.setdefault("provenance", prov)
+        # Index size is a first-class cost: it moved 1.3GB -> 946MB with the
+        # dims change and would have moved again with function chunking.
+        if rec.get("corpus"):
+            rec.setdefault("index_bytes",
+                           dir_bytes(HERE / "corpora" / rec["corpus"] / ".semgrep"))
         results.append(rec)
         with open(results_path, "a") as f:
             f.write(json.dumps(rec) + "\n")
