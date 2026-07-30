@@ -25,7 +25,7 @@ cd corpora
 
 VSCODE_SHA=db0569eab9d4a70ff7cd38b9013dd20b30a67207
 TOKIO_SHA=adc2ae7af2caaea83985fbdfbc7884c159c486f2
-OKHTTP_SHA=f258f7a14b3a56106ed051a841ce71fa8a978b97
+COMMONS_LANG_SHA=285cd2fc42a16de63f1ea518cfd7ea1851563c46
 ETCD_SHA=c1dc77f1da858ef50a847fd249c45bff43c1fe58
 JEKYLL_SHA=7697d249793d6c48c66a7293310a718aec01f660
 
@@ -79,7 +79,8 @@ fi
 
 if [ "${1:-}" != "--big-three-only" ]; then
   [ -d tokio ]  || pin_clone tokio  https://github.com/tokio-rs/tokio.git "$TOKIO_SHA"
-  [ -d okhttp ] || pin_clone okhttp https://github.com/square/okhttp.git  "$OKHTTP_SHA"
+  [ -d commons-lang ] || pin_clone commons-lang \
+    https://github.com/apache/commons-lang.git "$COMMONS_LANG_SHA"
   [ -d jekyll ] || pin_clone jekyll https://github.com/jekyll/jekyll.git  "$JEKYLL_SHA"
   if [ ! -d etcd ]; then
     pin_clone etcd https://github.com/etcd-io/etcd.git "$ETCD_SHA"
