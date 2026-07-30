@@ -100,6 +100,15 @@ def build(names=None):
         out[d.name] = meta
         print(f"{d.name:12s} {n_files:>7d} files  {total / 1e6:>8.1f} MB  "
               f"{digest[:16]}  ({time.time() - t0:.1f}s)")
+    # Drop entries for corpora that are no longer on disk, unless this was a
+    # --only run (which sees just one corpus and must not conclude the rest
+    # were deleted). Without this a removed corpus lingers and --check reports
+    # it MISSING forever, training the reader to ignore --check output.
+    if not names:
+        for gone in [k for k in out if not (CORPORA / k).is_dir()]:
+            print(f"{gone:12s} removed from disk — dropping from the manifest")
+            del out[gone]
+
     MANIFEST.parent.mkdir(parents=True, exist_ok=True)
     MANIFEST.write_text(json.dumps(out, indent=2, sort_keys=True) + "\n")
     return out
