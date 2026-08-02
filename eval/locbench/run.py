@@ -17,6 +17,7 @@ instance × condition); aggregate with report.py.
 """
 
 import argparse
+import hashlib
 import json
 import os
 import random
@@ -106,6 +107,31 @@ V4_LINE = (
     "occurrence. Read and Glob are also available."
 )
 
+# Guess-capture conditions (§16, Phase C): mechanics-only descriptions that
+# bound the §7.3 framing effect from two sides instead of pretending a
+# neutral description exists. No advice, no tradeoff language, no example —
+# §7.3 measured that agents imitate examples. cap-ranked omits `-e` entirely
+# (every guess is forced through ranked syntax); cap-two states both modes
+# symmetrically. Run with --no-score: capture runs must not mint
+# accuracy-shaped numbers under novel descriptions.
+CAPTURE_CONDITIONS = {
+    "cap-ranked": (
+        "The only code search tool available is `semgrep`. Usage: "
+        "`semgrep <query> [path]`. It prints up to 10 matching locations as "
+        "path:line:text, best matches first (`-k N` for more). "
+        "Read and Glob are also available."
+    ),
+    "cap-two": (
+        "The only code search tool available is `semgrep`. Usage: "
+        "`semgrep <query> [path]` prints up to 10 locations as "
+        "path:line:text, best matches first (`-k N` for more). "
+        "`semgrep -e <regex> [path]` prints every line matching the regex, "
+        "grep semantics, exit 1 on no match. Read and Glob are also available."
+    ),
+}
+for _name, _line in CAPTURE_CONDITIONS.items():
+    TOOL_LINES[_name] = _line + UNAVAILABLE
+
 # A/B engine conditions: name -> semgrep flags injected by the shim.
 # sg-sif additionally gets a --sif --sif-a 1e-4 index (built last per
 # instance since it replaces the worktree's .semgrep).
@@ -128,6 +154,7 @@ ALLOWED = {
     "search": ["Bash(search *)"],
     "both": ["Bash(rg *)", "Bash(semgrep *)"],
     **{name: ["Bash(semgrep *)"] for name in SG_ENGINE_CONDITIONS},
+    **{name: ["Bash(semgrep *)"] for name in CAPTURE_CONDITIONS},
 }
 
 PROMPT = """You are localizing where a change must be made in the repository at {tree}
@@ -283,6 +310,8 @@ def block_msgs(condition):
         "both": "use `rg` or `semgrep` for content search",
         **{n: "use `semgrep \"your query\"` for content search"
            for n in SG_ENGINE_CONDITIONS},
+        **{n: "use `semgrep \"your query\"` for content search"
+           for n in CAPTURE_CONDITIONS},
     }[condition]
     msgs = {f"LOCBENCH_BLOCKMSG_{t.upper()}":
             f"{t}: unavailable in this environment — {steer}"
@@ -353,13 +382,25 @@ def run_agent(instance, condition, tree, run_dir, args):
     # shimmed names fall through to shim.py's blocked path.
     if condition in ("rg", "both"):
         env["LOCBENCH_REAL_RG"] = RG
-    if condition in ("semgrep", "both") or condition in SG_ENGINE_CONDITIONS:
+    if (condition in ("semgrep", "both") or condition in SG_ENGINE_CONDITIONS
+            or condition in CAPTURE_CONDITIONS):
         env["LOCBENCH_REAL_SEMGREP"] = str(SEMGREP)
     if condition == "search":
         env["LOCBENCH_REAL_SEARCH"] = str(SEMGREP)
     flags = SG_ENGINE_CONDITIONS.get(condition, "")
     if flags:
         env["LOCBENCH_SEMGREP_FLAGS"] = flags
+    # Provenance the run dirs never had (§16 C2): the exact appended system
+    # prompt was invisible after the fact, so description versions were only
+    # recoverable by git archaeology. Written BEFORE the agent starts.
+    tool_line_text = TOOL_LINES[condition]
+    (cond_dir / "meta.json").write_text(json.dumps({
+        "instance_id": instance["instance_id"], "condition": condition,
+        "model": args.model, "tool_line": tool_line_text,
+        "tool_line_sha256": hashlib.sha256(tool_line_text.encode()).hexdigest()[:16],
+        "allowed_tools": ALLOWED[condition], "budget_usd": args.budget_usd,
+        "ts": time.strftime("%Y-%m-%dT%H:%M:%S"),
+    }, indent=1) + "\n")
     cmd = [
         CLAUDE, "-p", "--output-format", "stream-json", "--verbose",
         "--model", args.model,
@@ -478,7 +519,8 @@ def run_instance(instance, conditions, run_dir, args, emit):
     try:
         for condition in conditions:  # rg first by default: it must never see an index
             index = {"built": False, "reused": False, "build_wall_s": None, "index_mb": None}
-            if condition in ("semgrep", "both") or condition in SG_ENGINE_CONDITIONS:
+            if (condition in ("semgrep", "both") or condition in SG_ENGINE_CONDITIONS
+                    or condition in CAPTURE_CONDITIONS):
                 index = ensure_index(tree, meta_path, sif=(condition == "sg-sif"))
             index["present_during_run"] = (tree / ".semgrep").exists()
 
@@ -486,14 +528,21 @@ def run_instance(instance, conditions, run_dir, args, emit):
                 instance, condition, tree, run_dir, args
             )
             answer_files, answer_functions = answer or ([], [])
-            metrics = scoring.score_instance(
-                answer_files, answer_functions, gold_files, gold_funcs,
-                worktree_prefix=str(tree),
-            )
-            metrics["first_hit_search_seq"] = scoring.first_gold_hit_seq(
-                DATA / shim_log_rel, DATA / shim_log_rel.replace("shim_log.jsonl", "searches"),
-                gold_files,
-            )
+            if args.no_score:
+                # Capture runs (§16 C3): the agent never sees gold either way,
+                # but a novel tool description must not mint accuracy-shaped
+                # numbers as a side effect of harvesting queries.
+                metrics = None
+            else:
+                metrics = scoring.score_instance(
+                    answer_files, answer_functions, gold_files, gold_funcs,
+                    worktree_prefix=str(tree),
+                )
+                metrics["first_hit_search_seq"] = scoring.first_gold_hit_seq(
+                    DATA / shim_log_rel,
+                    DATA / shim_log_rel.replace("shim_log.jsonl", "searches"),
+                    gold_files,
+                )
             emit({
                 "run_id": args.run_id, "instance_id": iid, "condition": condition,
                 "model": args.model, "repo": repo, "base_commit": sha,
@@ -547,6 +596,8 @@ def main():
     ap.add_argument("--budget-usd", type=float, default=1.0)
     ap.add_argument("--timeout", type=int, default=900)
     ap.add_argument("--keep-worktrees", action="store_true")
+    ap.add_argument("--no-score", action="store_true",
+                    help="capture-only: emit rows with metrics=None (§16 C3)")
     ap.add_argument("--resume", action="store_true", help="skip (instance, condition, model) rows already ok in --out")
     ap.add_argument("--out", type=Path, default=DATA / "results.jsonl")
     args = ap.parse_args()
