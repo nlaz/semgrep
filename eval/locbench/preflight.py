@@ -152,25 +152,41 @@ def check_real_guess_replay(corpus, n=25):
 
 
 def check_no_coaching(corpus):
-    print("\n[3/4] no self-teaching footer under SEMGREP_NO_HINTS")
+    """Two separate contracts, both shipped as of RESEARCH.md §16.10.
+
+    (a) SEMGREP_NO_HINTS silences the footer entirely — the harness knob.
+    (b) Ranked footers never name `-e` *even unsuppressed* — the product
+        posture. Suppression alone was not enough: an arm whose description
+        withholds `-e` is coached anyway the moment someone runs the binary
+        without the env var, and the footer is the stronger dose of the two.
+    """
+    print("\n[3/4] footer carries no exact-mode coaching")
     p, _ = run(["--json", "-k", "3", "some query that will not match anything xyzzy",
                 str(corpus)])
-    if "-e" in p.stderr or "rephrase" in p.stderr:
+    if p.stderr.strip():
         fail("footer suppression",
-             f"stderr advertises exact mode: {p.stderr.strip()[:90]!r} — an arm "
-             f"that withholds -e in its description would be coached anyway")
+             f"stderr not silent under SEMGREP_NO_HINTS: {p.stderr.strip()[:90]!r}")
     else:
-        ok("footer suppression", "stderr carries no mode advice")
-    # And confirm it IS there without the env var, so the check can't pass vacuously.
+        ok("footer suppression", "stderr silent")
+
+    # Unsuppressed: the footer must exist (so the check above isn't vacuous)
+    # and must still not advertise exact mode.
     env = dict(os.environ)
     env.pop("SEMGREP_NO_HINTS", None)
     q = subprocess.run([str(SEMGREP), "-k", "3", "retry backoff", str(corpus)],
                        capture_output=True, text=True, timeout=120, env=env)
-    if "-e" not in q.stderr and "rephrase" not in q.stderr:
+    if "semgrep:" not in q.stderr:
         fail("footer suppression control",
-             "no footer even WITHOUT the env var — the check proves nothing")
+             "no footer even WITHOUT the env var — the check above proves nothing")
     else:
         ok("footer suppression control", "footer present when not suppressed")
+    if re.search(r"(?<![\w-])-e(?![\w-])|--exact", q.stderr):
+        fail("ranked footer posture",
+             f"the unsuppressed ranked footer names exact mode: "
+             f"{q.stderr.strip()[:90]!r} — §16.10 measured this one line moving "
+             f"ranked share 98% -> 7%")
+    else:
+        ok("ranked footer posture", "ranked footer does not advertise -e")
 
 
 def check_shims():

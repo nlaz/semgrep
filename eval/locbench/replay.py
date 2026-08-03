@@ -175,7 +175,17 @@ def run_query(tree, query, flags, k, is_exact, cache_dir=None):
 # Flags that change what gets INDEXED rather than how a query is answered.
 # Conditions here share one index per worktree, so an index flag would have
 # every condition silently measured against whichever index was built first.
-INDEX_FLAGS = {"--sif", "--sif-a", "--window", "--overlap", "--dims"}
+#
+# `--embed-preproc` belongs here even though it is spelled as a search flag:
+# the warm path renders the query with the *index's* stored `meta.embed_preproc`
+# and ignores the flag entirely (search/indexed.rs). So a condition passing
+# `--embed-preproc split` against an index built `none` is a silent no-op that
+# reports parity — a wrong number with nothing to distinguish it from a real
+# one. It cost §14.5 its gate: that section still asks for a replay this file
+# cannot run. Compare index builds with eval/locbench/guessplay.py, which
+# reindexes per config.
+INDEX_FLAGS = {"--sif", "--sif-a", "--window", "--overlap", "--dims",
+               "--embed-preproc"}
 
 
 def check_conditions(conds):

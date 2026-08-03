@@ -288,32 +288,45 @@ def ensure_worktree(repo, sha, iid=None):
     return tree, json.loads(meta_path.read_text())
 
 
-def ensure_index(tree, meta_path, sif=False):
+def ensure_index(tree, meta_path, sif=False, embed_preproc="none"):
     """Build .semgrep once per worktree (semgrep conditions); record cost.
-    `sif` selects the --sif --sif-a 1e-4 variant — a mismatched existing
-    index (normal vs sif) is rebuilt, so sif conditions should run last.
+    `sif` selects the --sif --sif-a 1e-4 variant and `embed_preproc` the
+    prose-rendering variant — an existing index whose build config differs
+    on EITHER is rebuilt, so variant conditions should run last.
+
+    Both must be checked, not just `sif`. The warm path answers a query in
+    whatever space the index was built in and ignores the search-side flag
+    (search/indexed.rs), so reusing a `none` index for a `split` condition
+    does not fail — it silently measures the wrong thing and reports parity.
+
     An index older than the binary is also rebuilt: a rebuilt binary may
     embed different dims (e.g. a swapped embedding table), and reusing that
     index makes every query bail on the dims check — which would look like
     a catastrophic accuracy result rather than the mechanical mismatch it is."""
     meta = json.loads(meta_path.read_text())
     idx_meta = tree / ".semgrep" / "meta.json"
+    want = {"sif": sif, "embed_preproc": embed_preproc}
     if idx_meta.exists():
+        have = json.loads(idx_meta.read_text())
         fresh = idx_meta.stat().st_mtime >= SEMGREP.stat().st_mtime
-        if json.loads(idx_meta.read_text()).get("sif", False) == sif and fresh:
-            return {"built": False, "reused": True, "sif": sif,
+        got = {"sif": have.get("sif", False),
+               "embed_preproc": have.get("embed_preproc", "none")}
+        if got == want and fresh:
+            return {"built": False, "reused": True, **want,
                     "build_wall_s": meta.get("index_build_s"),
                     "index_mb": meta.get("index_mb")}
     t0 = time.perf_counter()
     cmd = [str(SEMGREP), "index", str(tree)]
     if sif:
         cmd += ["--sif", "--sif-a", "0.0001"]
+    if embed_preproc != "none":
+        cmd += ["--embed-preproc", embed_preproc]
     subprocess.run(cmd, check=True, capture_output=True, timeout=3600)
     build_s = round(time.perf_counter() - t0, 1)
     index_mb = round(sum(f.stat().st_size for f in (tree / ".semgrep").rglob("*") if f.is_file()) / 1e6, 1)
     meta.update(index_build_s=build_s, index_mb=index_mb)
     meta_path.write_text(json.dumps(meta))
-    return {"built": True, "reused": False, "sif": sif,
+    return {"built": True, "reused": False, **want,
             "build_wall_s": build_s, "index_mb": index_mb}
 
 
