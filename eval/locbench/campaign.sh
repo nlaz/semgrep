@@ -15,6 +15,15 @@ CHUNK="${CHUNK:-80}"
 TARGET="${TARGET:-1120}"
 WORKERS="${WORKERS:-3}"
 
+# Gate: does the tool answer what agents actually type? The §16.10 campaign
+# spent $361 with 47% of one arm's searches silently empty because nobody
+# asked (RESEARCH.md §16.11). Seconds, no API calls, hard stop.
+echo "=== preflight"
+python3 preflight.py || {
+  echo "preflight failed — refusing to start a campaign on a broken tool."
+  exit 4
+}
+
 while :; do
   ok=$(python3 - "$OUT" <<'PY'
 import json, sys
