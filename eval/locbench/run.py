@@ -132,6 +132,36 @@ CAPTURE_CONDITIONS = {
 for _name, _line in CAPTURE_CONDITIONS.items():
     TOOL_LINES[_name] = _line + UNAVAILABLE
 
+# Description A/B conditions (§16.7): same engine, same binary, only the
+# tool description varies. desc-v4 is the §7.3 winner verbatim; desc-v5
+# removes the -e mention entirely (§16.6: mere mention collapses ranked
+# usage 72% -> 7%); desc-v6 adds the guess-folding instruction that
+# operationalizes §16.5's P6 (ladders belong in one ranked query).
+DESC_CONDITIONS = {
+    "desc-v4": V4_LINE,
+    "desc-v5": (
+        "The only code search tool available is `semgrep`, a ranked code "
+        "search. Give it anything — an identifier, a phrase, or a question: "
+        "`semgrep \"query\" [path]` returns the most relevant locations as "
+        "path:line:text (top 10; `-k N` for more). Ranked, not exhaustive — "
+        "if the answer isn't there, rephrase. Read and Glob are also "
+        "available."
+    ),
+    "desc-v6": (
+        "The only code search tool available is `semgrep`, a ranked code "
+        "search: `semgrep \"query\" [path]` returns the most relevant "
+        "locations as path:line:text (top 10; `-k N` for more). You don't "
+        "need to know what anything is called — describe the behavior, or "
+        "if you're torn between several possible names, put ALL your "
+        "candidate names in one query and let ranking sort it out. Ranked, "
+        "not exhaustive — if the answer isn't there, rephrase. Read and "
+        "Glob are also available."
+    ),
+}
+
+for _name, _line in DESC_CONDITIONS.items():
+    TOOL_LINES[_name] = _line + UNAVAILABLE
+
 # A/B engine conditions: name -> semgrep flags injected by the shim.
 # sg-sif additionally gets a --sif --sif-a 1e-4 index (built last per
 # instance since it replaces the worktree's .semgrep).
@@ -155,6 +185,7 @@ ALLOWED = {
     "both": ["Bash(rg *)", "Bash(semgrep *)"],
     **{name: ["Bash(semgrep *)"] for name in SG_ENGINE_CONDITIONS},
     **{name: ["Bash(semgrep *)"] for name in CAPTURE_CONDITIONS},
+    **{name: ["Bash(semgrep *)"] for name in DESC_CONDITIONS},
 }
 
 PROMPT = """You are localizing where a change must be made in the repository at {tree}
@@ -312,6 +343,8 @@ def block_msgs(condition):
            for n in SG_ENGINE_CONDITIONS},
         **{n: "use `semgrep \"your query\"` for content search"
            for n in CAPTURE_CONDITIONS},
+        **{n: "use `semgrep \"your query\"` for content search"
+           for n in DESC_CONDITIONS},
     }[condition]
     msgs = {f"LOCBENCH_BLOCKMSG_{t.upper()}":
             f"{t}: unavailable in this environment — {steer}"
@@ -383,7 +416,7 @@ def run_agent(instance, condition, tree, run_dir, args):
     if condition in ("rg", "both"):
         env["LOCBENCH_REAL_RG"] = RG
     if (condition in ("semgrep", "both") or condition in SG_ENGINE_CONDITIONS
-            or condition in CAPTURE_CONDITIONS):
+            or condition in CAPTURE_CONDITIONS or condition in DESC_CONDITIONS):
         env["LOCBENCH_REAL_SEMGREP"] = str(SEMGREP)
     if condition == "search":
         env["LOCBENCH_REAL_SEARCH"] = str(SEMGREP)
@@ -520,7 +553,8 @@ def run_instance(instance, conditions, run_dir, args, emit):
         for condition in conditions:  # rg first by default: it must never see an index
             index = {"built": False, "reused": False, "build_wall_s": None, "index_mb": None}
             if (condition in ("semgrep", "both") or condition in SG_ENGINE_CONDITIONS
-                    or condition in CAPTURE_CONDITIONS):
+                    or condition in CAPTURE_CONDITIONS
+                    or condition in DESC_CONDITIONS):
                 index = ensure_index(tree, meta_path, sif=(condition == "sg-sif"))
             index["present_during_run"] = (tree / ".semgrep").exists()
 
