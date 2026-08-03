@@ -21,7 +21,10 @@ Checks, each a hard failure:
   2. hits carry a non-empty path (the §16.11 sibling bug printed `:9:text`)
   3. no self-teaching footer leaks under SEMGREP_NO_HINTS (an A/B whose
      treatment arm withholds `-e` must not have the tool advertising it)
-  4. the shim blocks what it should and passes through what it should
+  4. grep muscle memory parses (§17): `-n` was 88% of the flags in the
+     measured agent corpus and every one of those calls exited 2, as did the
+     31% of calls passing more than one path
+  5. the shim blocks what it should and passes through what it should
 """
 
 import argparse
@@ -95,7 +98,7 @@ def literal_in(scope):
 
 
 def check_invocation_shapes(corpus, query):
-    print("\n[1/4] real invocation shapes return hits")
+    print("\n[1/5] real invocation shapes return hits")
     for label, scope in scope_shapes(corpus):
         lit = literal_in(scope)
         for mode_label, args in (("ranked", ["--json", query]),
@@ -120,7 +123,7 @@ def check_invocation_shapes(corpus, query):
 
 def check_real_guess_replay(corpus, n=25):
     """Replay actual logged agent invocations, shape-for-shape."""
-    print(f"\n[2/4] replaying {n} real agent invocation shapes from the logs")
+    print(f"\n[2/5] replaying {n} real agent invocation shapes from the logs")
     if not GUESSES.exists():
         print(f"  skip  (no {GUESSES.name}; run locbench/harvest.py)")
         return
@@ -160,7 +163,7 @@ def check_no_coaching(corpus):
         withholds `-e` is coached anyway the moment someone runs the binary
         without the env var, and the footer is the stronger dose of the two.
     """
-    print("\n[3/4] footer carries no exact-mode coaching")
+    print("\n[3/5] footer carries no exact-mode coaching")
     p, _ = run(["--json", "-k", "3", "some query that will not match anything xyzzy",
                 str(corpus)])
     if p.stderr.strip():
@@ -189,8 +192,60 @@ def check_no_coaching(corpus):
         ok("ranked footer posture", "ranked footer does not advertise -e")
 
 
+def check_grep_compat(corpus):
+    """Does the tool accept what grep muscle memory types? (RESEARCH.md §17)
+
+    Measured on the rg arm's 2,074 real invocations: `-n` appeared 1,829 times
+    (88%), `-A`/`-B` 142, `-g`/`--include` 273, `-l` 118, `-r`/`-R` 48, and 31%
+    of calls passed two or more paths. Every one of those exited 2. semgrep's
+    `path:line:text` output *is* grep's `-rn` form, so accepting the no-ops
+    costs nothing and refusing them cost a whole class of dead calls.
+
+    Asserted as exit != 2 — a usage error. Zero hits is fine; being unable to
+    parse the command line is not.
+    """
+    print("\n[4/5] grep muscle memory is accepted")
+    src = sorted(p for p in corpus.rglob("*") if p.is_file() and SRC.search(p.name))
+    subdirs = sorted({p.parent for p in src if p.parent != corpus})
+    two = [str(subdirs[0]), str(subdirs[-1])] if len(subdirs) > 1 else [str(corpus)]
+    cases = [
+        ("-n (88% of observed flags)", ["-n", "-k", "3", "retry backoff"]),
+        ("-r", ["-r", "-k", "3", "retry backoff"]),
+        ("-R", ["-R", "-k", "3", "retry backoff"]),
+        ("-H", ["-H", "-k", "3", "retry backoff"]),
+        ("-rn combined", ["-rn", "-k", "3", "retry backoff"]),
+        ("-rln combined", ["-rln", "-k", "3", "retry backoff"]),
+        ("-A 3", ["-A", "3", "-k", "2", "retry backoff"]),
+        ("-B 3", ["-B", "3", "-k", "2", "retry backoff"]),
+        ("-l", ["-l", "-k", "3", "retry backoff"]),
+        ("-g glob", ["-g", "*.md", "-k", "3", "retry backoff"]),
+        ("--include glob", ["--include", "*.md", "-k", "3", "retry backoff"]),
+    ]
+    for label, args in cases:
+        p, _ = run([*args, str(corpus)])
+        if p.returncode == 2:
+            fail(f"compat {label}", f"exit 2: {p.stderr.strip()[:70]!r}")
+        else:
+            ok(f"compat {label}", f"exit {p.returncode}")
+    # Multiple paths: grep's contract, 31% of real invocations.
+    p, _ = run(["-k", "3", "retry backoff", *two])
+    if p.returncode == 2:
+        fail("compat multi-path", f"exit 2: {p.stderr.strip()[:70]!r}")
+    else:
+        ok("compat multi-path", f"exit {p.returncode} over {len(two)} paths")
+    # The control. If an unknown flag stopped failing, the checks above would
+    # pass because argument parsing had gone permissive, not because the flags
+    # are handled — and the whole section would be measuring nothing.
+    p, _ = run(["--definitely-not-a-flag", "-k", "3", "retry backoff", str(corpus)])
+    if p.returncode != 2:
+        fail("compat control", "an unknown flag no longer errors — the checks "
+                               "above prove nothing")
+    else:
+        ok("compat control", "an unknown flag still exits 2")
+
+
 def check_shims():
-    print("\n[4/4] shim blocks and passes through as configured")
+    print("\n[5/5] shim blocks and passes through as configured")
     import tempfile
     with tempfile.TemporaryDirectory() as td:
         td = Path(td)
@@ -228,6 +283,7 @@ def main():
     check_invocation_shapes(args.corpus, args.query)
     check_real_guess_replay(args.corpus)
     check_no_coaching(args.corpus)
+    check_grep_compat(args.corpus)
     if not args.skip_shims:
         check_shims()
 
