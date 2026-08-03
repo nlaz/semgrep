@@ -432,6 +432,11 @@ def run_agent(instance, condition, tree, run_dir, args):
         "SEMGREP_NO_HINTS": "1",
         **block_msgs(condition),
     }
+    # Inherited LOCBENCH_* from the parent shell would silently hand an arm a
+    # tool it is supposed to lack; clear before binding (§16.9a hygiene).
+    for _k in ("LOCBENCH_REAL_RG", "LOCBENCH_REAL_SEMGREP", "LOCBENCH_REAL_SEARCH",
+               "LOCBENCH_SEMGREP_FLAGS"):
+        env.pop(_k, None)
     # Only the condition's tools get a REAL_* binding; the rest of the
     # shimmed names fall through to shim.py's blocked path.
     if condition in ("rg", "both"):

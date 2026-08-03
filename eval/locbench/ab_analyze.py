@@ -36,6 +36,7 @@ SECONDARY = ["file_acc@5", "file_acc@1", "file_recall@5", "func_acc@10_strict"]
 def load(path, conds, model=None):
     """-> {condition: {instance_id: row}}, last row wins (report.py:27-34)."""
     by = {c: {} for c in conds}
+    dupes = []
     for line in Path(path).read_text().splitlines():
         if not line.strip():
             continue
@@ -47,7 +48,14 @@ def load(path, conds, model=None):
             continue
         if model and r.get("model") != model:
             continue
-        by[r["condition"]][r["instance_id"]] = r
+        key = r["instance_id"]
+        if key in by[r["condition"]]:
+            dupes.append((r["condition"], key))
+        by[r["condition"]][key] = r
+    if dupes:
+        print(f"note: {len(dupes)} (instance, condition) keys appear more than "
+              f"once; the LAST ok row wins, matching report.py. Re-run chunks "
+              f"can supersede earlier rows — check if this is unexpected.")
     return by
 
 
@@ -112,6 +120,42 @@ def size_bucket(r):
     return "<2k" if n < 2000 else "2k-10k" if n <= 10000 else ">10k"
 
 
+UNSHIMMED = ("find", "python3", "python", "awk", "sed", "perl", "ls", "cat", "wc")
+
+
+def unshimmed_search(row, cond):
+    """Bash calls that are content searches the shim cannot see.
+
+    §16.9a A2: `find`, `python3 -c '...in line...'`, awk/sed are live and
+    unlogged in both arms. They are counted here from the transcript so the
+    ranked-share denominator and `first_hit_search_seq` can be read with the
+    right caveat rather than silently believed."""
+    rid = row.get("run_id")
+    if not rid:
+        return None
+    t = DATA / "runs" / rid / row["instance_id"] / cond / "transcript.jsonl"
+    if not t.exists():
+        return None
+    n_bash = n_uns = 0
+    for line in t.read_text(errors="replace").splitlines():
+        try:
+            ev = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        msg = ev.get("message") or {}
+        for blk in (msg.get("content") or []):
+            if not isinstance(blk, dict) or blk.get("name") != "Bash":
+                continue
+            cmd = ((blk.get("input") or {}).get("command") or "").strip()
+            if not cmd:
+                continue
+            n_bash += 1
+            first = cmd.split()[0].split("/")[-1] if cmd.split() else ""
+            if first in UNSHIMMED:
+                n_uns += 1
+    return n_bash, n_uns
+
+
 def behavior(by, cond, ids):
     """Ranked/exact/rg shares and cost over the PAIRED instances only.
 
@@ -123,8 +167,17 @@ def behavior(by, cond, ids):
     rows = [by[cond][i] for i in ids]
     runs = DATA / "runs"
     ranked = exact = rg = 0
+    n_bash = n_unshimmed = n_no_run_id = 0
     for r in rows:
-        log = runs / r["run_id"] / r["instance_id"] / cond / "shim_log.jsonl"
+        u = unshimmed_search(r, cond)
+        if u:
+            n_bash += u[0]
+            n_unshimmed += u[1]
+        rid = r.get("run_id")
+        if not rid:
+            n_no_run_id += 1
+            continue
+        log = runs / rid / r["instance_id"] / cond / "shim_log.jsonl"
         if not log.exists():
             continue
         for line in log.read_text().splitlines():
@@ -154,6 +207,9 @@ def behavior(by, cond, ids):
         "median_searches": statistics.median(searches) if searches else 0,
         "zero_search": sum(1 for s in searches if s == 0),
         "bypass": bypass,
+        "bash": n_bash, "unshimmed": n_unshimmed,
+        "unshimmed_share": n_unshimmed / n_bash if n_bash else 0.0,
+        "no_run_id": n_no_run_id,
     }
 
 
@@ -216,13 +272,16 @@ def main():
     print("\nbehavior:")
     print(f"  {'arm':<10} {'runs':>5} {'ranked':>7} {'exact':>6} {'rg':>5} "
           f"{'ranked%':>8} {'medCost':>8} {'total$':>8} {'medSrch':>8} "
-          f"{'0-srch':>7} {'bypass':>7}")
+          f"{'0-srch':>7} {'bypass':>7} {'unshim%':>8}")
     for arm in (args.a, args.b):
         h = behavior(by, arm, ids)
         print(f"  {arm:<10} {h['n_runs']:>5} {h['ranked']:>7} {h['exact']:>6} "
               f"{h['rg']:>5} {h['ranked_share']:>8.0%} ${h['median_cost']:>7.2f} "
               f"${h['total_cost']:>7.2f} {h['median_searches']:>8.0f} "
-              f"{h['zero_search']:>7} {h['bypass']:>7}")
+              f"{h['zero_search']:>7} {h['bypass']:>7} {h['unshimmed_share']:>8.0%}")
+    print("  unshim% = share of the arm's Bash calls that are find/python3/awk/"
+          "sed content searches\n  the shim never sees (§16.9a A2). Ranked share "
+          "and first-hit-seq are conditional on this.")
 
     # --- the §11.5 screen ---
     if args.emit_screen:
