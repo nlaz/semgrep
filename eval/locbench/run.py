@@ -632,6 +632,17 @@ def main():
     ap.add_argument("--keep-worktrees", action="store_true")
     ap.add_argument("--no-score", action="store_true",
                     help="capture-only: emit rows with metrics=None (§16 C3)")
+    ap.add_argument("--evict-mirrors", action="store_true",
+                    help="delete a repo's bare mirror once its last selected "
+                         "instance completes — caps disk at ~one large repo "
+                         "instead of the whole benchmark's mirror set (§16.9)")
+    ap.add_argument("--max-new", type=int, default=0,
+                    help="stop cleanly after N newly-emitted rows this "
+                         "invocation (chunked runs across usage windows; "
+                         "pair with --resume)")
+    ap.add_argument("--disk-floor-gb", type=float, default=4.0,
+                    help="refuse to start with less free disk than this "
+                         "(0 disables); eval/reclaim.sh frees corpora/caches")
     ap.add_argument("--resume", action="store_true", help="skip (instance, condition, model) rows already ok in --out")
     ap.add_argument("--out", type=Path, default=DATA / "results.jsonl")
     args = ap.parse_args()
@@ -643,6 +654,14 @@ def main():
     if not args.dataset.exists():
         sys.exit(f"missing dataset: run  bash eval/locbench/fetch-dataset.sh")
     subprocess.run([CLAUDE, "--version"], check=True, capture_output=True)
+
+    if args.disk_floor_gb:
+        free_gb = os.statvfs(DATA).f_bavail * os.statvfs(DATA).f_frsize / 1e9
+        if free_gb < args.disk_floor_gb:
+            sys.exit(f"only {free_gb:.1f} GB free (< --disk-floor-gb "
+                     f"{args.disk_floor_gb}); run eval/reclaim.sh or lower the "
+                     f"floor. Mirrors for the full benchmark need ~8-15 GB "
+                     f"unless --evict-mirrors is on.")
 
     rows = [json.loads(l) for l in args.dataset.read_text().splitlines()]
     if args.instances:
@@ -668,13 +687,31 @@ def main():
     out_f = open(args.out, "a")
 
     n_done = 0
+    consecutive_errors = 0
+    stop = threading.Event()
 
     def emit(record):
-        nonlocal n_done
+        nonlocal n_done, consecutive_errors
         with emit_lock:
             out_f.write(json.dumps(record) + "\n")
             out_f.flush()
             n_done += 1
+            # Usage-outage guard (the generate.py lesson, §16.9): a wave of
+            # instant agent_errors is a dead usage window, not data. Abort
+            # loudly; every non-ok row re-runs under --resume.
+            if record.get("status") in ("agent_error", "timeout"):
+                consecutive_errors += 1
+                if consecutive_errors >= 6 and not stop.is_set():
+                    stop.set()
+                    print("STOPPING: 6 consecutive agent errors — the usage "
+                          "window is likely exhausted. Re-run with --resume "
+                          "when it resets; completed rows are kept.", flush=True)
+            else:
+                consecutive_errors = 0
+            if args.max_new and n_done >= args.max_new and not stop.is_set():
+                stop.set()
+                print(f"STOPPING: --max-new {args.max_new} reached; "
+                      f"re-run with --resume for the next chunk.", flush=True)
             m = record.get("metrics") or {}
             print(f"[{n_done}/{len(rows) * len(conditions)}] {record['instance_id']} "
                   f"{record['condition']}: {record['status']}"
@@ -690,8 +727,35 @@ def main():
             todo.append((r, conds))
     print(f"{len(todo)} instances × {conditions} (model={args.model}, run={args.run_id})", flush=True)
 
+    # Rolling mirror eviction (§16.9): once the last selected instance of a
+    # repo finishes in this process, its bare mirror is deleted. Keeps disk
+    # bounded by the largest single repo; a later --resume re-clones.
+    repo_remaining = defaultdict(int)
+    for r, _ in todo:
+        repo_remaining[r["repo"]] += 1
+    evict_lock = threading.Lock()
+
+    def work(t):
+        r, conds = t
+        if stop.is_set():
+            return
+        try:
+            run_instance(r, conds, run_dir, args, emit)
+        finally:
+            if args.evict_mirrors:
+                with evict_lock:
+                    repo_remaining[r["repo"]] -= 1
+                    evict = repo_remaining[r["repo"]] == 0
+                if evict:
+                    mirror = DATA / "repos" / "mirrors" / \
+                        f"{r['repo'].replace('/', '__')}.git"
+                    if mirror.exists():
+                        with repo_locks[r["repo"]]:
+                            subprocess.run(["rm", "-rf", str(mirror)])
+                        print(f"  evicted mirror {mirror.name}", flush=True)
+
     with ThreadPoolExecutor(max_workers=args.workers) as pool:
-        list(pool.map(lambda t: run_instance(t[0], t[1], run_dir, args, emit), todo))
+        list(pool.map(work, todo))
 
     out_f.close()
     print(f"wrote {n_done} rows to {args.out}")
