@@ -32,6 +32,14 @@ PY
 )
   echo "=== campaign: $ok/$TARGET ok rows ($(date +%H:%M:%S))"
   [ "$ok" -ge "$TARGET" ] && { echo "campaign complete"; break; }
+  # Abandoned cells make TARGET unreachable, so "no progress last chunk" is
+  # the real completion signal — without it the loop spins on an empty todo.
+  if [ "${prev_ok:-}" = "$ok" ]; then
+    echo "campaign complete: no progress last chunk ($ok rows; the rest are "
+    echo "abandoned cells). Analyze with ab_analyze.py."
+    break
+  fi
+  prev_ok=$ok
 
   python3 run.py --limit 560 --conditions rg,desc-v5 --model sonnet \
     --resume --max-new "$CHUNK" --evict-mirrors --workers "$WORKERS" --out "$OUT"
