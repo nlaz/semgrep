@@ -37,6 +37,8 @@ SEMGREP = Path(os.environ.get("SEMGREP_BIN", HERE.parent.parent / "target/releas
 RG = os.environ.get("RG_BIN", "/opt/homebrew/bin/rg")
 CLAUDE = os.environ.get("CLAUDE_BIN", "claude")
 
+CLAUDE_VERSION = None
+
 UNAVAILABLE = " `grep` and `git` are unavailable in this environment."
 
 TOOL_LINES = {
@@ -210,11 +212,19 @@ repo_locks = defaultdict(threading.Lock)
 # checkout
 # ---------------------------------------------------------------------------
 
-def repo_key(repo, sha):
-    return f"{repo.replace('/', '__')}__{sha[:12]}"
+def repo_key(repo, sha, iid=None):
+    """Worktree identity. `iid` is load-bearing: the dataset contains 28
+    instance pairs sharing a (repo, base_commit), and keying the tree by
+    (repo, sha) alone let two workers check out, index, and then
+    `worktree remove --force` the SAME directory concurrently — deleting a
+    tree under a live agent, interleaving two `semgrep index` builds into
+    one staging dir, and leaking an index into the rg arm. Found by the
+    §16.9 adversarial review before the run, not after."""
+    base = f"{repo.replace('/', '__')}__{sha[:12]}"
+    return f"{base}__{iid}" if iid else base
 
 
-def ensure_worktree(repo, sha):
+def ensure_worktree(repo, sha, iid=None):
     """Blobless bare mirror per repo + detached worktree per (repo, sha).
     Returns (tree_path, meta dict). Meta lives outside the tree so the
     checkout stays pristine."""
@@ -224,8 +234,8 @@ def ensure_worktree(repo, sha):
     for d in (mirrors, trees, metas):
         d.mkdir(parents=True, exist_ok=True)
     mirror = mirrors / f"{repo.replace('/', '__')}.git"
-    tree = trees / repo_key(repo, sha)
-    meta_path = metas / f"{repo_key(repo, sha)}.json"
+    tree = trees / repo_key(repo, sha, iid)
+    meta_path = metas / f"{repo_key(repo, sha, iid)}.json"
 
     with repo_locks[repo]:
         if not mirror.exists():
@@ -268,6 +278,13 @@ def ensure_worktree(repo, sha):
                 "tree_mb": round(n_bytes / 1e6, 1),
                 "had_claude_md": had_claude_md,
             }))
+    if not meta_path.exists():
+        # An interrupted checkout (Ctrl-C mid-walk) leaves a tree with no
+        # meta; every later --resume used to die on FileNotFoundError.
+        meta_path.write_text(json.dumps(
+            {"checkout_s": None, "file_count": None, "tree_mb": None,
+             "had_claude_md": None, "note": "meta reconstructed after an "
+                                            "interrupted checkout"}))
     return tree, json.loads(meta_path.read_text())
 
 
@@ -300,9 +317,9 @@ def ensure_index(tree, meta_path, sif=False):
             "build_wall_s": build_s, "index_mb": index_mb}
 
 
-def remove_worktree(repo, sha):
+def remove_worktree(repo, sha, iid=None):
     mirror = DATA / "repos" / "mirrors" / f"{repo.replace('/', '__')}.git"
-    tree = DATA / "repos" / "trees" / repo_key(repo, sha)
+    tree = DATA / "repos" / "trees" / repo_key(repo, sha, iid)
     with repo_locks[repo]:
         subprocess.run(["git", "-C", str(mirror), "worktree", "remove", "--force", str(tree)],
                        capture_output=True)
@@ -409,6 +426,10 @@ def run_agent(instance, condition, tree, run_dir, args):
         # semgrep's write-through cache: isolate per run dir so eval runs
         # never populate (or read) the user's real ~/.cache/semgrep.
         "SEMGREP_CACHE_DIR": str(run_dir / "semgrep-cache"),
+        # No self-teaching footers in an A/B: they advertise `-e` after
+        # every ranked search, which would be an uncontrolled co-treatment
+        # in exactly the arm whose description withholds it (§16.9 A1).
+        "SEMGREP_NO_HINTS": "1",
         **block_msgs(condition),
     }
     # Only the condition's tools get a REAL_* binding; the rest of the
@@ -427,11 +448,24 @@ def run_agent(instance, condition, tree, run_dir, args):
     # prompt was invisible after the fact, so description versions were only
     # recoverable by git archaeology. Written BEFORE the agent starts.
     tool_line_text = TOOL_LINES[condition]
+    # Provenance for a multi-day campaign (§16.9a #11): a `cargo build` or a
+    # settings edit between chunks would otherwise change the treatment with
+    # nothing in the data recording it.
+    def _sha(path):
+        try:
+            return hashlib.sha256(Path(path).read_bytes()).hexdigest()[:16]
+        except OSError:
+            return None
     (cond_dir / "meta.json").write_text(json.dumps({
         "instance_id": instance["instance_id"], "condition": condition,
         "model": args.model, "tool_line": tool_line_text,
         "tool_line_sha256": hashlib.sha256(tool_line_text.encode()).hexdigest()[:16],
         "allowed_tools": ALLOWED[condition], "budget_usd": args.budget_usd,
+        "semgrep_sha256": _sha(SEMGREP),
+        "semgrep_mtime": SEMGREP.stat().st_mtime if SEMGREP.exists() else None,
+        "claude_version": CLAUDE_VERSION,
+        "settings_sha256": _sha(Path.home() / ".claude" / "settings.json"),
+        "dataset_sha256": _sha(args.dataset),
         "ts": time.strftime("%Y-%m-%dT%H:%M:%S"),
     }, indent=1) + "\n")
     cmd = [
@@ -539,23 +573,36 @@ def run_instance(instance, conditions, run_dir, args, emit):
     iid = instance["instance_id"]
     repo, sha = instance["repo"], instance["base_commit"]
     try:
-        tree, meta = ensure_worktree(repo, sha)
+        tree, meta = ensure_worktree(repo, sha, iid)
     except subprocess.CalledProcessError as e:
         for condition in conditions:
-            emit({"instance_id": iid, "condition": condition, "status": "checkout_error",
-                  "repo": repo, "base_commit": sha,
+            emit({"instance_id": iid, "condition": condition,
+                  "status": "checkout_error", "model": args.model,
+                  "run_id": args.run_id, "repo": repo, "base_commit": sha,
                   "error": (e.stderr or b"").decode(errors="replace")[-500:]})
         return
-    meta_path = DATA / "repos" / "meta" / f"{repo_key(repo, sha)}.json"
+    meta_path = DATA / "repos" / "meta" / f"{repo_key(repo, sha, iid)}.json"
 
     gold_files, gold_funcs = scoring.parse_gold(instance["edit_functions"])
     try:
         for condition in conditions:  # rg first by default: it must never see an index
+            if args.stop_event is not None and args.stop_event.is_set():
+                break
             index = {"built": False, "reused": False, "build_wall_s": None, "index_mb": None}
             if (condition in ("semgrep", "both") or condition in SG_ENGINE_CONDITIONS
                     or condition in CAPTURE_CONDITIONS
                     or condition in DESC_CONDITIONS):
-                index = ensure_index(tree, meta_path, sif=(condition == "sg-sif"))
+                try:
+                    index = ensure_index(tree, meta_path, sif=(condition == "sg-sif"))
+                except subprocess.SubprocessError as e:
+                    # An index failure is one condition's problem, not the
+                    # invocation's: it used to escape run_instance, drop every
+                    # remaining row silently, and re-raise out of pool.map.
+                    emit({"instance_id": iid, "condition": condition,
+                          "status": "index_error", "model": args.model,
+                          "run_id": args.run_id, "repo": repo, "base_commit": sha,
+                          "error": str(e)[-500:]})
+                    continue
             index["present_during_run"] = (tree / ".semgrep").exists()
 
             status, answer, agent, search, harness_wall_s, transcript_rel, shim_log_rel = run_agent(
@@ -592,7 +639,7 @@ def run_instance(instance, conditions, run_dir, args, emit):
             })
     finally:
         if not args.keep_worktrees:
-            remove_worktree(repo, sha)
+            remove_worktree(repo, sha, iid)
 
 
 # ---------------------------------------------------------------------------
@@ -640,6 +687,9 @@ def main():
                     help="stop cleanly after N newly-emitted rows this "
                          "invocation (chunked runs across usage windows; "
                          "pair with --resume)")
+    ap.add_argument("--max-attempts", type=int, default=3,
+                    help="give up on an (instance, condition) after N failed "
+                         "attempts so a chunked campaign can terminate")
     ap.add_argument("--disk-floor-gb", type=float, default=4.0,
                     help="refuse to start with less free disk than this "
                          "(0 disables); eval/reclaim.sh frees corpora/caches")
@@ -653,7 +703,10 @@ def main():
         sys.exit(f"missing rg at {RG} (set RG_BIN)")
     if not args.dataset.exists():
         sys.exit(f"missing dataset: run  bash eval/locbench/fetch-dataset.sh")
-    subprocess.run([CLAUDE, "--version"], check=True, capture_output=True)
+    global CLAUDE_VERSION
+    CLAUDE_VERSION = subprocess.run(
+        [CLAUDE, "--version"], check=True, capture_output=True,
+        text=True).stdout.strip()
 
     if args.disk_floor_gb:
         free_gb = os.statvfs(DATA).f_bavail * os.statvfs(DATA).f_frsize / 1e9
@@ -672,15 +725,31 @@ def main():
     conditions = args.conditions.split(",")
 
     done = set()
+    attempts = defaultdict(int)
     if args.resume and args.out.exists():
         for line in args.out.read_text().splitlines():
             try:
                 r = json.loads(line)
             except json.JSONDecodeError:
                 continue
+            key = (r["instance_id"], r["condition"], r.get("model"))
             if r.get("status") == "ok":
-                done.add((r["instance_id"], r["condition"], r.get("model")))
+                done.add(key)
+            else:
+                attempts[key] += 1
+    # Abandonment (§16.9a D2): without this, a deterministically-failing
+    # cell (dead repo, budget-blowing instance, model that won't emit JSON)
+    # is retried at the head of every chunk forever and eats the --max-new
+    # quota, so the campaign never terminates. Three strikes, then the cell
+    # is treated as done and scored as a miss — pre-registered either way.
+    abandoned = {k for k, n in attempts.items() if n >= args.max_attempts}
+    if abandoned:
+        print(f"abandoning {len(abandoned)} cells with >= {args.max_attempts} "
+              f"failed attempts (scored as misses): "
+              f"{sorted(k[0] for k in abandoned)[:5]}...", flush=True)
+        done |= abandoned
 
+    args.stop_event = None
     args.run_id = time.strftime("%Y%m%d-%H%M%S")
     run_dir = DATA / "runs" / args.run_id
     args.out.parent.mkdir(parents=True, exist_ok=True)
@@ -689,6 +758,7 @@ def main():
     n_done = 0
     consecutive_errors = 0
     stop = threading.Event()
+    outage = threading.Event()
 
     def emit(record):
         nonlocal n_done, consecutive_errors
@@ -699,10 +769,11 @@ def main():
             # Usage-outage guard (the generate.py lesson, §16.9): a wave of
             # instant agent_errors is a dead usage window, not data. Abort
             # loudly; every non-ok row re-runs under --resume.
-            if record.get("status") in ("agent_error", "timeout"):
+            if record.get("status") in ("agent_error", "parse_error"):
                 consecutive_errors += 1
                 if consecutive_errors >= 6 and not stop.is_set():
                     stop.set()
+                    outage.set()
                     print("STOPPING: 6 consecutive agent errors — the usage "
                           "window is likely exhausted. Re-run with --resume "
                           "when it resets; completed rows are kept.", flush=True)
@@ -754,11 +825,16 @@ def main():
                             subprocess.run(["rm", "-rf", str(mirror)])
                         print(f"  evicted mirror {mirror.name}", flush=True)
 
+    args.stop_event = stop
     with ThreadPoolExecutor(max_workers=args.workers) as pool:
         list(pool.map(work, todo))
 
     out_f.close()
     print(f"wrote {n_done} rows to {args.out}")
+    if outage.is_set():
+        # Distinct exit code so a `while :; do run.py --resume ...; done`
+        # driver can tell "usage window died" from "chunk complete".
+        sys.exit(3)
 
 
 if __name__ == "__main__":

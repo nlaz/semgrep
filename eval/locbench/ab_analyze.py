@@ -27,6 +27,9 @@ HERE = Path(__file__).parent
 DATA = HERE.parent / "data" / "locbench"
 
 PRIMARY = "func_acc@10_tol"
+# Co-primary (§16.9a C1): the binary endpoint discards resolution on the
+# ~96% of instances where both arms agree; recall is continuous.
+CO_PRIMARY = "func_recall@10_tol"
 SECONDARY = ["file_acc@5", "file_acc@1", "file_recall@5", "func_acc@10_strict"]
 
 
@@ -94,9 +97,12 @@ def endpoint_line(label, pairs):
     b, c, p = mcnemar(pairs)
     d, lo, hi = boot_ci(pairs)
     star = "*" if p < 0.05 else " "
+    # A CI whose bound is pinned at 0 by a single discordant pair reads as
+    # an effect to anyone skimming; say so instead.
+    ci = (f"CI[{lo:+.3f},{hi:+.3f}]" if b + c >= 5
+          else f"CI[{lo:+.3f},{hi:+.3f}](thin)")
     return (f"  {label:<22} n={len(pairs):>4}  a={ma:>5.3f} b={mb:>5.3f}  "
-            f"Δ={d:+.3f} CI[{lo:+.3f},{hi:+.3f}]  discordant {b}/{c}  "
-            f"p={p:.4f}{star}")
+            f"Δ={d:+.3f} {ci}  discordant {b}/{c}  p={p:.4f}{star}")
 
 
 def size_bucket(r):
@@ -106,9 +112,15 @@ def size_bucket(r):
     return "<2k" if n < 2000 else "2k-10k" if n <= 10000 else ">10k"
 
 
-def behavior(by, cond):
-    """Ranked/exact/rg shares and cost, from the stored search block."""
-    rows = list(by[cond].values())
+def behavior(by, cond, ids):
+    """Ranked/exact/rg shares and cost over the PAIRED instances only.
+
+    Reporting each arm over its own row set silently compares different
+    instance sets — on the §16.8 data that inverted the cost comparison
+    (rg looked 10% more expensive; paired, it is 3% cheaper). Chunked runs
+    guarantee the arms are out of sync at every boundary, so this must be
+    the intersection."""
+    rows = [by[cond][i] for i in ids]
     runs = DATA / "runs"
     ranked = exact = rg = 0
     for r in rows:
@@ -168,8 +180,15 @@ def main():
 
     print("endpoints (a − b):")
     print(endpoint_line(f"PRIMARY {PRIMARY}", metric_pairs(by, args.a, args.b, PRIMARY, ids)))
-    for k in SECONDARY:
-        print(endpoint_line(k, metric_pairs(by, args.a, args.b, k, ids)))
+    print(endpoint_line(f"CO-PRIM {CO_PRIMARY}",
+                        metric_pairs(by, args.a, args.b, CO_PRIMARY, ids)))
+    sec = [(k, metric_pairs(by, args.a, args.b, k, ids)) for k in SECONDARY]
+    raw_p = {k: (mcnemar(p)[2] if p else 1.0) for k, p in sec}
+    holm = {}
+    for rank, (k, p) in enumerate(sorted(raw_p.items(), key=lambda kv: kv[1])):
+        holm[k] = min(1.0, p * (len(sec) - rank))
+    for k, pairs in sec:
+        print(endpoint_line(k, pairs) + f"  holm={holm[k]:.3f}")
 
     # --- strata ---
     tiers = {}
@@ -180,19 +199,18 @@ def main():
         groups = defaultdict(list)
         for i in ids:
             groups[keyfn(i)].append(i)
-        print(f"\n{name} (primary endpoint):")
+        print(f"\n{name} — EXPLORATORY, uncorrected (primary endpoint):")
         for g, gids in sorted(groups.items(), key=lambda kv: -len(kv[1])):
             pairs = metric_pairs(by, args.a, args.b, PRIMARY, gids)
-            print(endpoint_line(str(g), pairs))
+            print(endpoint_line(str(g), pairs).replace("*", " "))
 
     if tiers:
         stratum_report("by issue-naming tier (§15.7)", lambda i: tiers.get(i, "?"))
     stratum_report("by category", lambda i: by[args.a][i].get("category") or "?")
     stratum_report("by repo size", lambda i: size_bucket(by[args.a][i]))
-    stratum_report(
-        "by search usage (a-arm)",
-        lambda i: "searched" if ((by[args.a][i].get("search") or {})
-                                 .get("n_invocations") or 0) else "zero-search")
+    # (The "by search usage" stratum is deliberately absent: partitioning on
+    # whether the treatment arm chose to search conditions on an outcome of
+    # treatment — collider stratification, §16.9a C4.)
 
     # --- behavior ---
     print("\nbehavior:")
@@ -200,7 +218,7 @@ def main():
           f"{'ranked%':>8} {'medCost':>8} {'total$':>8} {'medSrch':>8} "
           f"{'0-srch':>7} {'bypass':>7}")
     for arm in (args.a, args.b):
-        h = behavior(by, arm)
+        h = behavior(by, arm, ids)
         print(f"  {arm:<10} {h['n_runs']:>5} {h['ranked']:>7} {h['exact']:>6} "
               f"{h['rg']:>5} {h['ranked_share']:>8.0%} ${h['median_cost']:>7.2f} "
               f"${h['total_cost']:>7.2f} {h['median_searches']:>8.0f} "
@@ -218,9 +236,11 @@ def main():
         args.emit_screen.write_text(json.dumps({
             "arms": [args.a, args.b], "model": args.model,
             "n_paired": len(ids), "n_discriminative": len(disc),
-            "note": "instances where the two arms disagreed on the primary or "
-                    "file_acc@5 — §11.5's screen: future A/Bs pay for these "
-                    "only, but headline accuracy is quoted from the full frame",
+            "note": "DISCORDANCE MAP OF THIS RUN, not a neutral screen "
+                    "(§16.9a C5): instances selected by their own noisy "
+                    "outcome here. Re-using it as a cheap frame for future "
+                    "A/Bs inherits a winner's-curse bias; it is published as "
+                    "a description of where these two arms differed.",
             "instances": disc,
         }, indent=1) + "\n")
         print(f"\nwrote {len(disc)} discriminative instances "

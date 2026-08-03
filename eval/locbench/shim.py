@@ -69,6 +69,12 @@ def main():
         seq = sum(1 for _ in f)
         stdout_file = stdout_dir / f"{seq:03d}.out"
         stdout_file.write_bytes(out)
+        # Everything the agent was TOLD, not just how many bytes of it:
+        # semgrep's footers coach mode choice on stderr, which is a
+        # treatment channel in an A/B (§16.9a A1). Only stderr_bytes
+        # survived before, so the channel was unauditable after the fact.
+        if err:
+            (stdout_dir / f"{seq:03d}.err").write_bytes(err)
         f.write(json.dumps({
             "seq": seq,
             "ts": time.time(),
