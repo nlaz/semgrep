@@ -331,12 +331,28 @@ def ensure_index(tree, meta_path, sif=False, embed_preproc="none"):
 
 
 def remove_worktree(repo, sha, iid=None):
+    """Remove a worktree, and make sure it is gone even if git cannot do it.
+
+    `git worktree remove` needs a live mirror to operate on, and fails quietly
+    (capture_output, no check) when there isn't one — so an interrupted run, or
+    an eviction that beat the cleanup, leaves the tree on disk with nothing that
+    will ever collect it. Four such trees, 218 MB, were found orphaned against
+    an empty mirrors directory. On a 560-instance campaign that leak is
+    unbounded and would halt the run halfway on a full disk, which is the one
+    failure mode that costs a whole chunk of spend rather than one row.
+
+    So: try git first (it also updates the mirror's worktree metadata), then
+    verify, then remove the directory outright. Idempotent by construction.
+    """
     mirror = DATA / "repos" / "mirrors" / f"{repo.replace('/', '__')}.git"
     tree = DATA / "repos" / "trees" / repo_key(repo, sha, iid)
     with repo_locks[repo]:
-        subprocess.run(["git", "-C", str(mirror), "worktree", "remove", "--force", str(tree)],
-                       capture_output=True)
-        subprocess.run(["git", "-C", str(mirror), "worktree", "prune"], capture_output=True)
+        if mirror.exists():
+            subprocess.run(["git", "-C", str(mirror), "worktree", "remove", "--force", str(tree)],
+                           capture_output=True)
+            subprocess.run(["git", "-C", str(mirror), "worktree", "prune"], capture_output=True)
+        if tree.exists():
+            subprocess.run(["rm", "-rf", str(tree)])
 
 
 # ---------------------------------------------------------------------------
@@ -443,6 +459,17 @@ def run_agent(instance, condition, tree, run_dir, args):
         # every ranked search, which would be an uncontrolled co-treatment
         # in exactly the arm whose description withholds it (§16.9 A1).
         "SEMGREP_NO_HINTS": "1",
+        # Per-invocation forensics. The §16.10 campaign captured only
+        # (argv, exit, stdout_bytes) per search, which is why a bug that
+        # silently emptied 47% of the treatment arm was found by reading
+        # transcripts weeks later instead of by the harness. This env var is
+        # built for exactly this (telemetry.rs): it does not perturb the argv
+        # the agent sees, so it works underneath shim.py, and it captures
+        # invocations no outer flag can reach — including the second full
+        # search an exact-miss suggestion runs. One line per invocation, with
+        # mode, index/cache resolution, files_walked, chunks considered,
+        # repair outcome, stage timings and exit code. Read by triage.py.
+        "SEMGREP_TRACE_FILE": str(cond_dir / "trace.jsonl"),
         **block_msgs(condition),
     }
     # Inherited LOCBENCH_* from the parent shell would silently hand an arm a
@@ -840,8 +867,21 @@ def main():
                         f"{r['repo'].replace('/', '__')}.git"
                     if mirror.exists():
                         with repo_locks[r["repo"]]:
+                            # Any tree for this repo goes BEFORE its mirror:
+                            # once the mirror is gone `git worktree remove` has
+                            # nothing to operate on and the tree is stranded.
+                            stray = sorted((DATA / "repos" / "trees").glob(
+                                f"{r['repo'].replace('/', '__')}__*"))
+                            for t in stray:
+                                subprocess.run(["git", "-C", str(mirror), "worktree",
+                                                "remove", "--force", str(t)],
+                                               capture_output=True)
+                                if t.exists():
+                                    subprocess.run(["rm", "-rf", str(t)])
                             subprocess.run(["rm", "-rf", str(mirror)])
-                        print(f"  evicted mirror {mirror.name}", flush=True)
+                        print(f"  evicted mirror {mirror.name}"
+                              f"{f' (+{len(stray)} stray trees)' if stray else ''}",
+                              flush=True)
 
     args.stop_event = stop
     with ThreadPoolExecutor(max_workers=args.workers) as pool:
