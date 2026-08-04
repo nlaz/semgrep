@@ -134,6 +134,10 @@ _VALUED_FLAGS = {"-k", "--top", "-C", "--context", "-A", "-B", "-M", "--max-colu
                  "-g", "--glob", "--include", "-m", "--max-count", "-t", "--type",
                  "--mode", "-e", "--regexp", "-f", "--file", "--max-depth"}
 _HIT_LINE = re.compile(r"(?m)^([^\s:][^:\n]*):\d+:")
+# The single-file form, where the tool omits the path because the caller
+# already named it: `264:\ttext`. Without this the scorer goes blind on
+# exactly the scope agents use most — see the docstring below.
+_HIT_LINE_NOPATH = re.compile(r"(?m)^\d+:\t")
 
 
 def _scopes(argv):
@@ -175,6 +179,12 @@ def first_gold_hit_seq(shim_log_path, stdout_dir, gold_files):
     So each result line's path is also rejoined to the invocation's own scope
     and compared to gold outright. Both matchers are ORed: either is sufficient
     evidence the search surfaced the file.
+
+    A third form exists since the tool started following grep's single-file
+    rule: given one named file it prints `264\ttext` with no path at all,
+    because the path is on every line and the caller just typed it. Neither
+    matcher above can see that, so the scope itself is checked against gold —
+    a hit in a path-less listing is in the named file by construction.
     """
     import pathlib
 
@@ -205,6 +215,10 @@ def first_gold_hit_seq(shim_log_path, stdout_dir, gold_files):
             return pos
         cwd = row.get("cwd") or ""
         scopes = [_rel(s, cwd) for s in _scopes(row.get("argv") or [])]
+        # Path-less output means the caller named exactly one file, so the hit
+        # is in *that* file by construction — there is nothing else it could be.
+        if _HIT_LINE_NOPATH.search(text) and any(s in gold for s in scopes):
+            return pos
         for m in _HIT_LINE.finditer(text):
             printed = _rel(m.group(1), cwd)
             if printed in gold:
