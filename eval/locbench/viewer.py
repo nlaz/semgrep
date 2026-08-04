@@ -471,8 +471,22 @@ const PAGE = 100;
 function renderTable() {
   const metric = $('#metric').value, q = $('#q').value.trim().toLowerCase();
   const tier = $('#tier').value, outcome = $('#outcome').value;
+  const activity = $('#activity').value;
   let rows = PAIRS.filter(p => {
     if (tier !== 'all' && p.tier !== tier) return false;
+    /* Did the agent actually reach for the search tool? A task it answered
+       without searching cannot separate the arms — 75 of 640 here — which is
+       §11.5's point about most instances carrying no engine signal, and the
+       reason a reviewer wants to exclude them before reading anything into a
+       win or a loss. Counts rg and semgrep only; Read and Glob do not qualify. */
+    if (activity !== 'all') {
+      const c = a => ((p.arms[a] || {}).n_semgrep || 0) + ((p.arms[a] || {}).n_rg || 0);
+      const searched = ARMS.filter(a => p.arms[a] && c(a) > 0).length;
+      const present = ARMS.filter(a => p.arms[a]).length;
+      if (activity === 'any' && searched === 0) return false;
+      if (activity === 'both' && !(present > 1 && searched === present)) return false;
+      if (activity === 'none' && searched > 0) return false;
+    }
     if (q && !(p.instance_id.toLowerCase().includes(q) || (p.repo || '').toLowerCase().includes(q)))
       return false;
     const a = p.arms['desc-v5'], b = p.arms['rg'];
@@ -742,7 +756,7 @@ function openFromHash() {
 /* ---------- boot ---------- */
 renderHeadline(); renderGates(); renderScore();
 B.tiers.forEach(t => $('#tier').append(new Option(short(t.name), t.name)));
-['q', 'tier', 'outcome', 'metric'].forEach(id =>
+['q', 'tier', 'outcome', 'metric', 'activity'].forEach(id =>
   $('#' + id).addEventListener(id === 'q' ? 'input' : 'change', () => { page = 0; renderTable(); }));
 document.querySelectorAll('#itable th[data-k]').forEach(th => {
   th.onclick = () => { const k = th.dataset.k;
@@ -821,6 +835,11 @@ def build(bundle, out_path):
           <option value="both">both found</option>
           <option value="neither">neither found</option>
           <option value="traj">has trajectory</option></select>
+        <select id="activity" aria-label="search activity">
+          <option value="all">searched or not</option>
+          <option value="any">called rg or semgrep</option>
+          <option value="both">called it in both arms</option>
+          <option value="none">never called it</option></select>
         <span class="count" id="count"></span>
         <span class="pager"><button class="btn" id="prev">&lsaquo; prev</button>
           <span class="count" id="pageinfo"></span>
