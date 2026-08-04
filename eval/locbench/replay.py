@@ -76,7 +76,7 @@ def parse_argv(argv):
     return is_exact, query, scopes
 
 
-DEFAULT_TOOLS = ("semgrep", "search")
+DEFAULT_TOOLS = ("semgrep", "search", "sg")
 
 
 def harvest(runs_dir, want_exact, tools=DEFAULT_TOOLS):

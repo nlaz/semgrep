@@ -41,6 +41,12 @@ CLAUDE_VERSION = None
 
 UNAVAILABLE = " `grep` and `git` are unavailable in this environment."
 
+# Claude Code's own refusal when a Bash call is not covered by --allowedTools.
+# Distinct from the shim's block message, which names the tool and steers. Lives
+# here, and `capture.py` imports it, because a marker string defined twice is a
+# marker string that eventually differs in one place (RESEARCH.md §19.8).
+DENIAL_MARKER = "Permission to use Bash has been denied"
+
 TOOL_LINES = {
     "rg": (
         "The only code search tool available is `rg` (ripgrep): "
@@ -203,7 +209,38 @@ DESC_CONDITIONS = {
         "exhaustive — if the answer isn't there, rephrase. Read and Glob are "
         "also available."
     ),
+    # desc-v9 (§19.9): desc-v8 renamed to `sg`, plus "you run with Bash" folded
+    # into the identity sentence rather than added as a standalone line — the
+    # failure it targets is an agent emitting a structured tool_use block whose
+    # input schema is this description's own signature, so the correction
+    # belongs where the tool is introduced, not appended after it.
+    #
+    # This changes TWO things at once and therefore attributes neither. §16.6
+    # and the `search` name-gravity arm both say a name alone can move
+    # behaviour, so a later campaign moving is evidence that "v9 moved", not
+    # that the Bash clause worked. Accepted deliberately: the defect it
+    # addresses is worth 4 tasks in 204, and a frame to split it is not.
+    "desc-v9": (
+        "The only code search tool available is `sg`, a ranked code search "
+        "you run with Bash. Give it anything — an identifier, a phrase, or a "
+        "question: `sg \"query\" [path]` returns the most relevant locations "
+        "as path:line:text (top 10; `-k N` for more). Example: sg "
+        "\"retry_backoff backoff_delay compute_delay\" → "
+        "src/net/retry.rs:142:fn backoff_delay(attempt: u32). Ranked, not "
+        "exhaustive — if the answer isn't there, rephrase. Read and Glob are "
+        "also available."
+    ),
 }
+
+# Arms whose agent is told to type something other than `semgrep`. The binary is
+# the same either way (`sg` and `semgrep` are two [[bin]] targets over one
+# source); only the name in the description and on PATH differs.
+ARM_TOOL = {"desc-v9": "sg"}
+
+# Every search-tool name the shims cover. `sg` is here so its shim exists for
+# every arm, not only desc-v9 — an arm that mentions a name with no shim behind
+# it would reach the real binary on PATH and escape the harness entirely.
+SHIMMED_SEARCH_TOOLS = ("rg", "semgrep", "search", "sg")
 
 for _name, _line in DESC_CONDITIONS.items():
     TOOL_LINES[_name] = _line + UNAVAILABLE
@@ -231,7 +268,9 @@ ALLOWED = {
     "both": ["Bash(rg *)", "Bash(semgrep *)"],
     **{name: ["Bash(semgrep *)"] for name in SG_ENGINE_CONDITIONS},
     **{name: ["Bash(semgrep *)"] for name in CAPTURE_CONDITIONS},
-    **{name: ["Bash(semgrep *)"] for name in DESC_CONDITIONS},
+    # Derived from tool_of so an arm that types `sg` is permitted `sg`, not
+    # `semgrep` — a mismatch here denies every search in the arm.
+    **{name: [f"Bash({ARM_TOOL.get(name, 'semgrep')} *)"] for name in DESC_CONDITIONS},
 }
 
 PROMPT = """You are localizing where a change must be made in the repository at {tree}
@@ -417,28 +456,42 @@ def make_shims(bin_dir):
     path). This also covers the off-condition tool: bare `rg` in the semgrep
     condition must not fall through to the real homebrew binary."""
     bin_dir.mkdir(parents=True, exist_ok=True)
-    for tool in ["rg", "semgrep", "search", *BLOCKED_TOOLS]:
+    for tool in [*SHIMMED_SEARCH_TOOLS, *BLOCKED_TOOLS]:
         w = bin_dir / tool
         w.write_text(f'#!/bin/sh\nexec /usr/bin/env python3 "{HERE / "shim.py"}" {tool} "$@"\n')
         w.chmod(0o755)
 
 
+def tool_of(condition):
+    """The shimmed binary name this arm's agent is told to run.
+
+    One function rather than a mapping repeated at each site, because the sites
+    do not fail the same way. `shim.py` derives `LOCBENCH_REAL_{tool.upper()}`
+    from argv, so an arm whose shim name and whose REAL_* binding disagree falls
+    into the *blocked* path: exit 2 with a steer message on both streams, which
+    looks like a catastrophic result rather than a harness bug. Adding an arm
+    that types a new name means adding it here and nowhere else.
+    """
+    if condition == "rg":
+        return "rg"
+    if condition == "search":
+        return "search"
+    return ARM_TOOL.get(condition, "semgrep")
+
+
 def block_msgs(condition):
+    tool = tool_of(condition)
     steer = {
         "rg": "use `rg` (ripgrep) for content search",
-        "semgrep": "use `semgrep \"your query\"` for content search",
-        "search": "use `search \"your query\"` for content search",
         "both": "use `rg` or `semgrep` for content search",
-        **{n: "use `semgrep \"your query\"` for content search"
-           for n in SG_ENGINE_CONDITIONS},
-        **{n: "use `semgrep \"your query\"` for content search"
-           for n in CAPTURE_CONDITIONS},
-        **{n: "use `semgrep \"your query\"` for content search"
-           for n in DESC_CONDITIONS},
-    }[condition]
+    }.get(condition, f"use `{tool} \"your query\"` for content search")
+    # Every shimmed name needs a message, blocked tools included: without one
+    # `shim.py` falls back to a bare "X is unavailable" with no steer, which is
+    # the silence df9a3c0 went out of its way to end. `git` is overwritten just
+    # below with its own wording.
     msgs = {f"LOCBENCH_BLOCKMSG_{t.upper()}":
             f"{t}: unavailable in this environment — {steer}"
-            for t in ("grep", "egrep", "fgrep", "rg", "semgrep", "search")}
+            for t in (*BLOCKED_TOOLS, *SHIMMED_SEARCH_TOOLS)}
     msgs["LOCBENCH_BLOCKMSG_GIT"] = (
         "git: unavailable in this environment — do not retry git commands; "
         "search the working tree instead"
@@ -518,21 +571,21 @@ def run_agent(instance, condition, tree, run_dir, args):
     }
     # Inherited LOCBENCH_* from the parent shell would silently hand an arm a
     # tool it is supposed to lack; clear before binding (§16.9a hygiene).
-    for _k in ("LOCBENCH_REAL_RG", "LOCBENCH_REAL_SEMGREP", "LOCBENCH_REAL_SEARCH",
-               "LOCBENCH_SEMGREP_FLAGS"):
-        env.pop(_k, None)
+    for _t in SHIMMED_SEARCH_TOOLS:
+        env.pop(f"LOCBENCH_REAL_{_t.upper()}", None)
+        env.pop(f"LOCBENCH_{_t.upper()}_FLAGS", None)
     # Only the condition's tools get a REAL_* binding; the rest of the
-    # shimmed names fall through to shim.py's blocked path.
+    # shimmed names fall through to shim.py's blocked path. Derived from
+    # `tool_of` so the name the agent is told to type, the shim it lands on,
+    # and the binding that makes it real cannot drift apart.
     if condition in ("rg", "both"):
         env["LOCBENCH_REAL_RG"] = RG
-    if (condition in ("semgrep", "both") or condition in SG_ENGINE_CONDITIONS
-            or condition in CAPTURE_CONDITIONS or condition in DESC_CONDITIONS):
-        env["LOCBENCH_REAL_SEMGREP"] = str(SEMGREP)
-    if condition == "search":
-        env["LOCBENCH_REAL_SEARCH"] = str(SEMGREP)
+    tool = tool_of(condition)
+    if tool != "rg":
+        env[f"LOCBENCH_REAL_{tool.upper()}"] = str(SEMGREP)
     flags = SG_ENGINE_CONDITIONS.get(condition, "")
     if flags:
-        env["LOCBENCH_SEMGREP_FLAGS"] = flags
+        env[f"LOCBENCH_{tool.upper()}_FLAGS"] = flags
     # Provenance the run dirs never had (§16 C2): the exact appended system
     # prompt was invisible after the fact, so description versions were only
     # recoverable by git archaeology. Written BEFORE the agent starts.
@@ -589,6 +642,7 @@ def run_agent(instance, condition, tree, run_dir, args):
              "duration_api_ms": None, "usage": {}, "bash_calls_in_transcript": 0,
              "forbidden_tool_events": 0}
     result_text = ""
+    n_denied = 0
     for line in transcript.read_text(errors="replace").splitlines():
         try:
             ev = json.loads(line)
@@ -601,6 +655,12 @@ def run_agent(instance, condition, tree, run_dir, args):
                         agent["bash_calls_in_transcript"] += 1
                     elif block.get("name") in ("Grep", "Task", "Agent"):
                         agent["forbidden_tool_events"] += 1
+        # Refusals by the permission layer, which no other record can hold: the
+        # call never executes, so the shim never runs and n_invocations cannot
+        # see it. Counted here rather than in a second pass because this loop
+        # already visits every event (RESEARCH.md §19.8).
+        if DENIAL_MARKER in line:
+            n_denied += line.count(DENIAL_MARKER)
         elif ev.get("type") == "result":
             agent.update(
                 num_turns=ev.get("num_turns"),
@@ -618,9 +678,14 @@ def run_agent(instance, condition, tree, run_dir, args):
         status = "parse_error"
 
     # --- shim log ---
-    search = {"n_invocations": 0, "n_rg": 0, "n_semgrep": 0, "n_search": 0, "n_blocked": 0,
+    # Per-tool counters derived from the shim list: `search[f"n_{tool}"] += 1`
+    # below would KeyError on a tool with no slot, failing the run outright.
+    search = {**{f"n_{t}": 0 for t in SHIMMED_SEARCH_TOOLS},
+              "n_invocations": 0, "n_blocked": 0,
               "blocked_tools": {}, "total_wall_ms": 0.0, "wall_ms_by_tool": {},
               "total_stdout_bytes": 0, "n_nonzero_exit": 0,
+              # Not from the shim log — see the transcript loop above.
+              "n_denied": n_denied,
               "shim_bypass_suspected": False}
     if shim_log.exists():
         for line in shim_log.read_text().splitlines():

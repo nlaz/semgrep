@@ -64,12 +64,12 @@ def stats(rs):
             )
         )
         # "search" is the same binary under the name-ablation alias.
-        if rows and rows[0]["tool"] in ("semgrep", "search") and "-e" not in rows[0]["argv"]:
+        if rows and rows[0]["tool"] in ("semgrep", "sg", "search") and "-e" not in rows[0]["argv"]:
             ranked_first += 1
         for x in rows:
             if x["tool"] == "rg":
                 n_rg += 1
-            elif x["tool"] in ("semgrep", "search"):
+            elif x["tool"] in ("semgrep", "sg", "search"):
                 n_sg += 1
                 if "-e" in x["argv"]:
                     sg_exact += 1

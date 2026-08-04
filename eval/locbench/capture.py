@@ -35,10 +35,13 @@ from pathlib import Path
 # `semgrep` or `rg` in *command* position: at the start, or after a pipe,
 # semicolon, `&&`, or an env-var prefix. Deliberately not a substring test —
 # see the comment at its use site in `timeline_of`.
-INVOKES_SEARCH = re.compile(r"(?:^|[;&|]\s*|\b[A-Z_]+=\S+\s+)(semgrep|rg)\s")
+INVOKES_SEARCH = re.compile(r"(?:^|[;&|]\s*|\b[A-Z_]+=\S+\s+)(semgrep|sg|rg)\s")
 
 HERE = Path(__file__).parent
 DATA = HERE.parent / "data" / "locbench"
+sys.path.insert(0, str(HERE))
+
+import run  # noqa: E402  — for DENIAL_MARKER; run.py imports nothing from here
 
 # Per-run limits. Generous enough that nothing in tier 1 is actually cut (the
 # largest run made 24 searches), tight enough that a 1,115-run campaign would
@@ -140,15 +143,10 @@ def summary_row(r):
         "answer_files": r.get("answer_files") or [],
         "answer_functions": r.get("answer_functions") or [],
         "has_trajectory": False,
-        # Filled by denials_of. Not from `search`, because the harness cannot
-        # see these at all — see that function.
-        "n_denied": None,
+        # `run.py` records this during the campaign; `denials_of` fills it
+        # from the transcript for campaigns that predate the field.
+        "n_denied": s.get("n_denied"),
     }
-
-
-# Claude Code's own refusal when a Bash call is not covered by --allowedTools.
-# Distinct from the shim's block message, which names the tool and steers.
-_DENIAL = "Permission to use Bash has been denied"
 
 
 def denials_of(d):
@@ -162,13 +160,16 @@ def denials_of(d):
     because of the `git`. On the §19.7 campaign that cost 288 calls across 88
     tasks, and 29 tasks per arm ended with zero searches actually run.
 
-    Counted from the transcript because that is the only place it appears.
+    Counted from the transcript because that is the only place it appears —
+    though `run.py` now records it into the `search` record during the
+    campaign, so `summary_row` prefers that and this is the fallback for
+    campaigns that predate the field.
     """
     t = d / "transcript.jsonl"
     if not t.exists():
         return None
     try:
-        return t.read_text(errors="replace").count(_DENIAL)
+        return t.read_text(errors="replace").count(run.DENIAL_MARKER)
     except OSError:
         return None
 
@@ -408,7 +409,8 @@ def capture(full, summary, tasks):
             d = cond_dir(r) if r.get("run_id") else None
             # Counted for summary tiers too: one integer, and it is the only
             # record of a refused call anywhere in the harness.
-            if d and d.exists():
+            # Only when the campaign did not record it (pre-§19.9 results).
+            if sr.get("n_denied") is None and d and d.exists():
                 sr["n_denied"] = denials_of(d)
             if want_traj and d and d.exists() and r.get("status") == "ok":
                 searches, drop_s = searches_of(r, d)

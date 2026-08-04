@@ -99,7 +99,7 @@ def literal_in(scope):
 
 
 def check_invocation_shapes(corpus, query):
-    print("\n[1/5] real invocation shapes return hits")
+    print("\n[1/6] real invocation shapes return hits")
     for label, scope in scope_shapes(corpus):
         lit = literal_in(scope)
         for mode_label, args in (("ranked", ["--json", query]),
@@ -124,7 +124,7 @@ def check_invocation_shapes(corpus, query):
 
 def check_real_guess_replay(corpus, n=25):
     """Replay actual logged agent invocations, shape-for-shape."""
-    print(f"\n[2/5] replaying {n} real agent invocation shapes from the logs")
+    print(f"\n[2/6] replaying {n} real agent invocation shapes from the logs")
     if not GUESSES.exists():
         print(f"  skip  (no {GUESSES.name}; run locbench/harvest.py)")
         return
@@ -164,7 +164,7 @@ def check_no_coaching(corpus):
         withholds `-e` is coached anyway the moment someone runs the binary
         without the env var, and the footer is the stronger dose of the two.
     """
-    print("\n[3/5] footer carries no exact-mode coaching")
+    print("\n[3/6] footer carries no exact-mode coaching")
     p, _ = run(["--json", "-k", "3", "some query that will not match anything xyzzy",
                 str(corpus)])
     if p.stderr.strip():
@@ -205,7 +205,7 @@ def check_grep_compat(corpus):
     Asserted as exit != 2 — a usage error. Zero hits is fine; being unable to
     parse the command line is not.
     """
-    print("\n[4/5] grep muscle memory is accepted")
+    print("\n[4/6] grep muscle memory is accepted")
     src = sorted(p for p in corpus.rglob("*") if p.is_file() and SRC.search(p.name))
     subdirs = sorted({p.parent for p in src if p.parent != corpus})
     two = [str(subdirs[0]), str(subdirs[-1])] if len(subdirs) > 1 else [str(corpus)]
@@ -274,11 +274,31 @@ def check_grep_compat(corpus):
 
 
 def check_shims():
-    print("\n[5/5] shim blocks and passes through as configured")
+    sys.path.insert(0, str(HERE))
+    import run as locbench
+
+    print("\n[5/6] every arm's tool is shimmed, permitted and bound")
+    # Shim, allowlist entry and REAL_* binding must agree. They are derived from
+    # `tool_of` now, but the failure mode if they ever diverge is the worst kind
+    # the harness has: the arm's tool falls into shim.py's *blocked* path, exits
+    # 2 with a steer on both streams, and produces a clean-looking catastrophic
+    # result. Cheap to check, and it must be checked before money is spent.
+    for cond in sorted({*locbench.DESC_CONDITIONS, "rg", "semgrep", "search", "both"}):
+        tool = locbench.tool_of(cond)
+        allowed = locbench.ALLOWED.get(cond) or []
+        shimmed = tool in locbench.SHIMMED_SEARCH_TOOLS
+        permitted = any(f"Bash({tool} " in a for a in allowed)
+        blockmsg = f"LOCBENCH_BLOCKMSG_{tool.upper()}" in locbench.block_msgs(cond)
+        if shimmed and permitted and blockmsg:
+            ok(f"arm wiring {cond}", f"tool={tool}")
+        else:
+            fail(f"arm wiring {cond}",
+                 f"tool={tool} shimmed={shimmed} permitted={permitted} "
+                 f"blockmsg={blockmsg} — this arm's searches would be blocked")
+
+    print("\n[6/6] shim blocks and passes through as configured")
     with tempfile.TemporaryDirectory() as td:
         td = Path(td)
-        sys.path.insert(0, str(HERE))
-        import run as locbench
         (td / "bin").mkdir()
         locbench.make_shims(td / "bin")
         env = dict(os.environ)

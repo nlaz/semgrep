@@ -27,7 +27,7 @@ sys.path.insert(0, str(HERE))
 
 DATA = HERE.parent / "data" / "locbench"
 
-SEARCH_TOOLS = ("semgrep", "search", "rg")
+SEARCH_TOOLS = ("semgrep", "search", "sg", "rg")
 
 # semgrep CLI flags that take a value (superset of replay.py's list).
 SG_VALUED = {"-k", "-C", "--mode", "--sem-weight", "--mmr-lambda", "--window",

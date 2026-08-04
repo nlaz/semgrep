@@ -159,7 +159,7 @@ def cond_dir(row):
 def searches(row):
     """This run's semgrep invocations, in order, from the shim log."""
     return [e for e in read_jsonl(cond_dir(row) / "shim_log.jsonl")
-            if not e.get("blocked") and e.get("tool") == "semgrep"]
+            if not e.get("blocked") and e.get("tool") in ("semgrep", "sg", "search")]
 
 
 def traces(row):

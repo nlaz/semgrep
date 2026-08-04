@@ -1,7 +1,7 @@
 """The description README tells you to paste must be the one the harness scores.
 
 README.md recommends a tool description to put in an agent's system prompt.
-`eval/locbench/run.py` holds the same string as the `desc-v8` campaign arm.
+`eval/locbench/run.py` holds the same string as the shipped campaign arm.
 Nothing but this test keeps them equal, and they are easy to drift apart: one
 gets reworded for a reader, the other stays what was measured, and the README
 then recommends a description no campaign has ever run.
@@ -23,6 +23,9 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "eval" / "locbench"))
 
+# The arm README ships. One name, so a future desc-v10 needs one edit here.
+SHIPPED = "desc-v9"
+
 HEADING = "### The tool description to give your agent"
 # Present in the scored arm because the harness blocks every other tool; not
 # part of what semgrep recommends to a reader, so the README may omit it.
@@ -43,10 +46,10 @@ def readme_snippet():
     return blocks[1]
 
 
-def test_readme_matches_the_scored_desc_v8_arm():
+def test_readme_matches_the_scored_arm():
     import run
 
-    canonical = normalize(run.DESC_CONDITIONS["desc-v8"])
+    canonical = normalize(run.DESC_CONDITIONS[SHIPPED])
     expected = normalize(canonical.replace(HARNESS_ONLY, ""))
     assert normalize(readme_snippet()) == expected
 
@@ -60,13 +63,15 @@ def test_the_example_query_is_names_rather_than_a_question():
     """
     import run
 
-    example = run.DESC_CONDITIONS["desc-v8"]
-    quoted = re.findall(r'semgrep "([^"]+)"', example)
-    assert quoted, "desc-v8 lost its worked example"
+    example = run.DESC_CONDITIONS[SHIPPED]
+    # Name-agnostic: the arm is `sg` now and was `semgrep`, and the point of
+    # the test is the example's *query*, never the binary in front of it.
+    quoted = re.findall(r'\b\w+ "([^"]+)"', example)
+    assert quoted, f"{SHIPPED} lost its worked example"
     query = quoted[-1]
     question_words = {"where", "how", "what", "does", "is", "the", "which", "why"}
     assert not (set(query.lower().split()) & question_words), (
-        f"desc-v8's example query {query!r} reads as a description; §19.2b's "
+        f"{SHIPPED}'s example query {query!r} reads as a description; §19.2b's "
         f"whole result is that it must demonstrate candidate names"
     )
     assert len(query.split()) > 1, "the example should show several candidate names"

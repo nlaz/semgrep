@@ -185,7 +185,7 @@ def behavior(by, cond, ids):
                 e = json.loads(line)
             except json.JSONDecodeError:
                 continue
-            if e.get("blocked") or e.get("tool") not in ("semgrep", "rg", "search"):
+            if e.get("blocked") or e.get("tool") not in ("semgrep", "sg", "rg", "search"):
                 continue
             if e["tool"] == "rg":
                 rg += 1

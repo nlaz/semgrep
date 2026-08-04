@@ -33,9 +33,13 @@ def main():
     real = os.environ.get(f"LOCBENCH_REAL_{tool.upper()}")
     # Per-condition engine flags (A/B): appended to the real invocation but
     # never shown to the agent — its commands and the logged argv stay clean.
+    # Derived from argv rather than a hardcoded tool list, to match the
+    # REAL_/BLOCKMSG_ lookups below. A new tool name (`sg`, §19.9) then needs no
+    # edit here — and an edit missed here would silently drop an A/B arm's
+    # engine flags while the run still looked healthy.
     injected = ""
-    if real is not None and tool in ("semgrep", "search"):
-        injected = os.environ.get("LOCBENCH_SEMGREP_FLAGS", "")
+    if real is not None:
+        injected = os.environ.get(f"LOCBENCH_{tool.upper()}_FLAGS", "")
     log_path = Path(os.environ["LOCBENCH_SHIM_LOG"])
     stdout_dir = Path(os.environ["LOCBENCH_STDOUT_DIR"])
 
