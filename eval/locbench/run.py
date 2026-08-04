@@ -159,6 +159,26 @@ DESC_CONDITIONS = {
         "not exhaustive — if the answer isn't there, rephrase. Read and "
         "Glob are also available."
     ),
+    # desc-v7 (§19): desc-v5 with the §7.3 micro-example restored, and nothing
+    # else — one inserted sentence, character-identical either side of it, so
+    # the arm isolates the example rather than a rewrite.
+    #
+    # The example is in v4 and absent from v5 by accident rather than by
+    # decision: v5 was derived by cutting `-e` out of v4 (§16.6), and the
+    # example went with it because it was the clause that mentioned a mode.
+    # §7.3's winner was ranked-as-identity framing *plus* a micro-example, so
+    # what ships today is half of a measured result. §7.3 also found agents
+    # imitate examples more reliably than they follow rules, which is what
+    # makes an example the lever rather than another sentence of advice.
+    "desc-v7": (
+        "The only code search tool available is `semgrep`, a ranked code "
+        "search. Give it anything — an identifier, a phrase, or a question: "
+        "`semgrep \"query\" [path]` returns the most relevant locations as "
+        "path:line:text (top 10; `-k N` for more). Example: semgrep \"where "
+        "is the retry backoff computed\" → src/net/retry.rs:142:fn "
+        "backoff_delay(attempt: u32). Ranked, not exhaustive — if the answer "
+        "isn't there, rephrase. Read and Glob are also available."
+    ),
 }
 
 for _name, _line in DESC_CONDITIONS.items():

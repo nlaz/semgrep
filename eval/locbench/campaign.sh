@@ -1,19 +1,36 @@
 #!/usr/bin/env bash
-# Drive the §16.9 campaign to completion in resumable chunks.
+# Drive a two-arm campaign to completion in resumable chunks.
 #
-# One canonical run (results-scale.jsonl, one model); each chunk is a
-# --resume slice. Stops cleanly when the usage window dies (run.py exits 3)
-# instead of burning error rows, and stops when the frame is complete.
+# One canonical run per output file, one model; each chunk is a --resume
+# slice. Stops cleanly when the usage window dies (run.py exits 3) instead
+# of burning error rows, and stops when the frame is complete.
 #
-#   eval/locbench/campaign.sh              # run until done or the window dies
+#   eval/locbench/campaign.sh              # the §16.9 frame: rg vs desc-v5
 #   CHUNK=40 eval/locbench/campaign.sh     # smaller slices
+#
+# The arms are parameters rather than literals so a second A/B does not need
+# a forked copy of this loop. The §19 description A/B (desc-v7 vs desc-v5)
+# is paired *within* semgrep, so it wants its own output file and no rg arm:
+#
+#   OUT=../data/locbench/results-desc-v7.jsonl \
+#   CONDITIONS=desc-v5,desc-v7 LIMIT=200 eval/locbench/campaign.sh
+#
+# Defaults reproduce the §16.9 invocation exactly (560 × 2 arms = 1120).
 set -uo pipefail
 cd "$(dirname "$0")"
 
-OUT=../data/locbench/results-scale.jsonl
+OUT="${OUT:-../data/locbench/results-scale.jsonl}"
+CONDITIONS="${CONDITIONS:-rg,desc-v5}"
+MODEL="${MODEL:-sonnet}"
+LIMIT="${LIMIT:-560}"
 CHUNK="${CHUNK:-80}"
-TARGET="${TARGET:-1120}"
 WORKERS="${WORKERS:-3}"
+# One ok row per (instance, arm), so the frame is instances × arms unless the
+# caller overrides it. Derived rather than typed twice: a TARGET that silently
+# disagrees with CONDITIONS is a loop that never terminates.
+NCOND=$(awk -F, '{print NF}' <<<"$CONDITIONS")
+TARGET="${TARGET:-$((LIMIT * NCOND))}"
+echo "=== campaign: $CONDITIONS × $LIMIT instances ($MODEL) -> $OUT [target $TARGET]"
 
 # Gate: does the tool answer what agents actually type? The §16.10 campaign
 # spent $361 with 47% of one arm's searches silently empty because nobody
@@ -50,7 +67,7 @@ PY
   fi
   prev_ok=$ok
 
-  python3 run.py --limit 560 --conditions rg,desc-v5 --model sonnet \
+  python3 run.py --limit "$LIMIT" --conditions "$CONDITIONS" --model "$MODEL" \
     --resume --max-new "$CHUNK" --evict-mirrors --workers "$WORKERS" --out "$OUT"
   rc=$?
   if [ "$rc" -eq 3 ]; then
