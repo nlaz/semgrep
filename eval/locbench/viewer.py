@@ -170,6 +170,7 @@ header{position:sticky;top:0;z-index:20;background:var(--bg);border-bottom:1px s
 .chip{font-family:var(--mono);font-size:10.5px;padding:2px 7px;border-radius:99px;
   border:1px solid var(--line);color:var(--ink-3);background:var(--panel);white-space:nowrap}
 .chip b{color:var(--ink-2);font-weight:600}
+.chip.bad{color:var(--bad);border-color:var(--bad);background:var(--bad-bg)}
 @media (max-width:820px){.chip.opt{display:none}}
 nav{display:flex;gap:2px;max-width:1360px;margin:0 auto;padding:0 20px}
 nav button{font-family:var(--sans);font-size:13px;padding:7px 13px;border:0;
@@ -480,6 +481,7 @@ let sortKey = 'instance_id', sortDir = 1, page = 0;
 const PAGE = 100;
 function renderTable() {
   const metric = $('#metric').value, q = $('#q').value.trim().toLowerCase();
+  const denied = $('#denied').value;
   const tier = $('#tier').value, outcome = $('#outcome').value;
   const activity = $('#activity').value;
   let rows = PAIRS.filter(p => {
@@ -497,6 +499,24 @@ function renderTable() {
       if (activity === 'both' && !(present > 1 && searched === present)) return false;
       if (activity === 'none' && searched > 0) return false;
     }
+    /* Permission denials are invisible to every other record: a refused call
+       never reaches the shim, so n_searches cannot count it. Under
+       `Bash(rg *)` a compound `rg …; git log …` is refused whole, taking its
+       searches with it. */
+    if (denied !== 'all') {
+      const nd = sum(p, 'n_denied');
+      const c = a => ((p.arms[a] || {}).n_semgrep || 0) + ((p.arms[a] || {}).n_rg || 0);
+      /* `lost` is per-arm, not per-task: the case worth seeing is one arm
+         refused into running no searches at all while the other worked
+         normally — Zulko__moviepy-2253, where rg chained `rg …; git log …`
+         under `Bash(rg *)` and had both searches refused with the git. A
+         task-level "nobody searched" test hides exactly those, because the
+         other arm is fine. */
+      const armLost = ARMS.some(a => p.arms[a] && (p.arms[a].n_denied || 0) > 0 && c(a) === 0);
+      if (denied === 'any' && !(nd > 0)) return false;
+      if (denied === 'none' && nd > 0) return false;
+      if (denied === 'lost' && !armLost) return false;
+    }
     if (q && !(p.instance_id.toLowerCase().includes(q) || (p.repo || '').toLowerCase().includes(q)))
       return false;
     const a = p.arms[TREAT], b = p.arms[CTRL];
@@ -511,6 +531,7 @@ function renderTable() {
   const val = (p, k) => {
     if (k === 'cost') return sum(p, 'cost');
     if (k === 'searches') return sum(p, 'n_searches');
+    if (k === 'denied') return sum(p, 'n_denied');
     if (k === 'outcome') { const a = p.arms[TREAT], b = p.arms[CTRL];
       return (a && (a.metrics || {})[metric] ? 2 : 0) + (b && (b.metrics || {})[metric] ? 1 : 0); }
     return p[k] ?? '';
@@ -546,7 +567,10 @@ function renderTable() {
       }
       tr.append(td);
     });
-    tr.append(el('td', 'num', String(sum(p, 'n_searches'))),
+    const nd = sum(p, 'n_denied');
+    const dtd = el('td', 'num', nd ? String(nd) : '·');
+    if (nd) dtd.style.color = 'var(--bad)'; else dtd.style.color = 'var(--ink-3)';
+    tr.append(el('td', 'num', String(sum(p, 'n_searches'))), dtd,
               el('td', 'num', '$' + sum(p, 'cost').toFixed(2)));
     const td = el('td');
     const has = p.arms[TREAT] && p.arms[TREAT].has_trajectory;
@@ -611,6 +635,8 @@ function armColumn(p, arm, gold) {
     if (r.status !== 'ok') head.append(el('span', 'pill warn', r.status));
     head.append(el('span', 'chip', `$${(r.cost || 0).toFixed(3)}`),
                 el('span', 'chip', `${r.n_searches || 0} tool calls`));
+      if (r.n_denied) head.append(el('span', 'chip bad',
+        `${r.n_denied} denied by permissions`));
     const fh = (r.metrics || {}).first_hit_search_seq;
     head.append(el('span', 'pill ' + (fh != null ? 'good' : 'mute'),
       fh != null ? `gold at search ${fh}` : 'never surfaced gold'));
@@ -776,7 +802,7 @@ function openFromHash() {
 /* ---------- boot ---------- */
 renderHeadline(); renderGates(); renderScore();
 B.tiers.forEach(t => $('#tier').append(new Option(short(t.name), t.name)));
-['q', 'tier', 'outcome', 'metric', 'activity'].forEach(id =>
+['q', 'tier', 'outcome', 'metric', 'activity', 'denied'].forEach(id =>
   $('#' + id).addEventListener(id === 'q' ? 'input' : 'change', () => { page = 0; renderTable(); }));
 document.querySelectorAll('#itable th[data-k]').forEach(th => {
   th.onclick = () => { const k = th.dataset.k;
@@ -856,6 +882,11 @@ def build(bundle, out_path):
           <option value="both">both found</option>
           <option value="neither">neither found</option>
           <option value="traj">has trajectory</option></select>
+        <select id="denied" aria-label="permission denials">
+          <option value="all">denied or not</option>
+          <option value="any">hit a permission denial</option>
+          <option value="none">no denial</option>
+          <option value="lost">an arm lost all its searches</option></select>
         <select id="activity" aria-label="search activity">
           <option value="all">searched or not</option>
           <option value="any">called rg or semgrep</option>
@@ -872,6 +903,7 @@ def build(bundle, out_path):
         <th data-k="outcome" title="the agent's final answer, by the selected metric">{html.escape(ARMS[0])}</th>
         <th data-k="outcome" title="the agent's final answer, by the selected metric">{html.escape(ARMS[1])}</th>
         <th data-k="searches" class="num">tool calls</th>
+        <th data-k="denied" class="num" title="tool calls refused by the permission layer; these never reach the shim, so they are counted nowhere else">denied</th>
         <th data-k="cost" class="num">cost</th>
         <th>detail</th></tr></thead><tbody id="tbody"></tbody></table></div>
       <div class="note">

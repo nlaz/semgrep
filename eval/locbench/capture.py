@@ -140,7 +140,37 @@ def summary_row(r):
         "answer_files": r.get("answer_files") or [],
         "answer_functions": r.get("answer_functions") or [],
         "has_trajectory": False,
+        # Filled by denials_of. Not from `search`, because the harness cannot
+        # see these at all — see that function.
+        "n_denied": None,
     }
+
+
+# Claude Code's own refusal when a Bash call is not covered by --allowedTools.
+# Distinct from the shim's block message, which names the tool and steers.
+_DENIAL = "Permission to use Bash has been denied"
+
+
+def denials_of(d):
+    """How many tool calls the *permission layer* refused, which no other
+    record holds.
+
+    A denied call never executes, so the shim never runs, so `shim_log.jsonl`
+    has no row and `search.n_invocations` cannot count it. The loss is real:
+    Claude Code evaluates a compound command as a whole, so an agent that types
+    `rg …; rg …; git log …` under `Bash(rg *)` has *both* searches refused
+    because of the `git`. On the §19.7 campaign that cost 288 calls across 88
+    tasks, and 29 tasks per arm ended with zero searches actually run.
+
+    Counted from the transcript because that is the only place it appears.
+    """
+    t = d / "transcript.jsonl"
+    if not t.exists():
+        return None
+    try:
+        return t.read_text(errors="replace").count(_DENIAL)
+    except OSError:
+        return None
 
 
 def searches_of(row, d):
@@ -376,6 +406,10 @@ def capture(full, summary, tasks):
         for r in rows:
             sr = summary_row(r)
             d = cond_dir(r) if r.get("run_id") else None
+            # Counted for summary tiers too: one integer, and it is the only
+            # record of a refused call anywhere in the harness.
+            if d and d.exists():
+                sr["n_denied"] = denials_of(d)
             if want_traj and d and d.exists() and r.get("status") == "ok":
                 searches, drop_s = searches_of(r, d)
                 timeline, drop_t, unrec, unplaced = timeline_of(d, searches)
