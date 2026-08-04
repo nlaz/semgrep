@@ -15,22 +15,43 @@
 #   OUT=../data/locbench/results-desc-v7.jsonl \
 #   CONDITIONS=desc-v5,desc-v7 LIMIT=200 eval/locbench/campaign.sh
 #
-# Defaults reproduce the §16.9 invocation exactly (560 × 2 arms = 1120).
+# Defaults reproduce the §16.9 frame's *shape* (560 × 2 arms = 1120) but not its
+# arms: the treatment is desc-v8 since §19.4, because a harness whose default
+# tests something other than what README recommends stops being evidence about
+# the product. Pass CONDITIONS=rg,desc-v5 to reproduce §16.9 literally.
 set -uo pipefail
 cd "$(dirname "$0")"
 
 OUT="${OUT:-../data/locbench/results-scale.jsonl}"
-CONDITIONS="${CONDITIONS:-rg,desc-v5}"
+CONDITIONS="${CONDITIONS:-rg,desc-v8}"
 MODEL="${MODEL:-sonnet}"
 LIMIT="${LIMIT:-560}"
 CHUNK="${CHUNK:-80}"
 WORKERS="${WORKERS:-3}"
+# An explicit instance list (see tierframe.py), for a frame that a --limit
+# cannot express — §19.5 wants equal strata, not a random sample of a
+# population that is 62% one stratum.
+INSTANCES="${INSTANCES:-}"
+BUDGET="${BUDGET:-}"
 # One ok row per (instance, arm), so the frame is instances × arms unless the
 # caller overrides it. Derived rather than typed twice: a TARGET that silently
 # disagrees with CONDITIONS is a loop that never terminates.
 NCOND=$(awk -F, '{print NF}' <<<"$CONDITIONS")
-TARGET="${TARGET:-$((LIMIT * NCOND))}"
-echo "=== campaign: $CONDITIONS × $LIMIT instances ($MODEL) -> $OUT [target $TARGET]"
+if [ -n "$INSTANCES" ]; then
+  # --instances overrides --limit inside run.py, so the frame is the list's
+  # length. Deriving TARGET from LIMIT here instead would leave the loop
+  # waiting for rows nobody asked for, forever.
+  NINST=$(awk -F, '{print NF}' <<<"$INSTANCES")
+  SELECT=(--instances "$INSTANCES")
+  FRAME="$NINST instances (explicit list)"
+else
+  NINST="$LIMIT"
+  SELECT=(--limit "$LIMIT")
+  FRAME="$LIMIT instances"
+fi
+[ -n "$BUDGET" ] && SELECT+=(--budget-usd "$BUDGET")
+TARGET="${TARGET:-$((NINST * NCOND))}"
+echo "=== campaign: $CONDITIONS × $FRAME ($MODEL) -> $OUT [target $TARGET]"
 
 # Gate: does the tool answer what agents actually type? The §16.10 campaign
 # spent $361 with 47% of one arm's searches silently empty because nobody
@@ -67,7 +88,7 @@ PY
   fi
   prev_ok=$ok
 
-  python3 run.py --limit "$LIMIT" --conditions "$CONDITIONS" --model "$MODEL" \
+  python3 run.py "${SELECT[@]}" --conditions "$CONDITIONS" --model "$MODEL" \
     --resume --max-new "$CHUNK" --evict-mirrors --workers "$WORKERS" --out "$OUT"
   rc=$?
   if [ "$rc" -eq 3 ]; then
