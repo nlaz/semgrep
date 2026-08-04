@@ -49,7 +49,7 @@ DATA = HERE.parent / "data" / "locbench"
 # Gate thresholds. Stated as constants so a run that trips one names the number
 # it tripped, and so loosening a gate is a visible edit rather than a judgement
 # call made while staring at a failing report.
-MAX_USAGE_ERRORS = 0            # exit 2: the tool could not parse the command
+MAX_UNKNOWN_FLAG = 0            # exit 2 the TOOL is answerable for (see classify_usage)
 MAX_EMPTY_RANKED_SHARE = 0.02   # was 0.59 in §16.10
 MAX_ALL_EMPTY_INSTANCES = 0     # was 18% of instances in §16.10
 MAX_TOOL_DISTRESS = 0           # help probes / repeats caused by empty results
@@ -70,6 +70,62 @@ def gate(name, value, limit, worse="above", detail="", pct=False):
     print(f"  {mark}  {name}: {shown} (limit {lim}){(' — ' + detail) if detail else ''}")
     if bad:
         FAILURES.append((name, shown, lim, detail))
+
+
+# Every flag the CLI accepts, and which of them take a value. Classification
+# works from argv alone: the shim records `stderr_bytes` but deliberately not
+# the stderr text, because semgrep's footers coach mode choice and that is a
+# treatment channel in an A/B (§16.9a A1).
+VALUED_FLAGS = {"-k", "--top", "-C", "--context", "-A", "--after-context",
+                "-B", "--before-context", "-g", "--glob", "--include",
+                "--mode", "--sem-weight", "--window", "--overlap"}
+KNOWN_FLAGS = VALUED_FLAGS | {
+    "-e", "--exact", "-i", "--ignore-case", "-F", "--fixed-string", "--all",
+    "--json", "--stats", "--stats-json", "--check-stale", "-l",
+    "--files-with-matches", "-n", "--line-number", "-r", "--recursive",
+    "-R", "--dereference-recursive", "-H", "--with-filename",
+    "-h", "--help", "-V", "--version", "--no-index", "--"}
+
+
+def classify_usage(argv):
+    """Whose fault is an exit 2?
+
+    Not every usage error is a defect. Gating on the raw count fails the run
+    when the tool *correctly* rejects a path that does not exist — which is the
+    single most useful error it emits, because an agent reads "no results" as
+    "the code is not there" and a wrong path is the other explanation. A gate
+    that punishes the tool for being right is a gate nobody can pass.
+
+    So gate only on the category that can hide a real gap: an unrecognised
+    flag. That is where grep muscle memory lands — §17 found `-n` was 88% of
+    the flags typed at a grep-shaped tool and every one exited 2 — so a nonzero
+    count there means the compat surface has gone short again. The rest are
+    correct rejections: reported, not gated.
+    """
+    toks = [a for a in argv if a]
+    if not toks:
+        return "empty argv"
+    # A trailing value-taking flag: `semgrep "q" tests -k` with no number.
+    if toks[-1] in VALUED_FLAGS:
+        return "missing flag value (tool correct)"
+    # A query that begins with a dash reads as flags. The caller's mistake, but
+    # the message is unhelpful without the `--` hint, so it is tracked apart.
+    if toks[0].startswith("-") and " " in toks[0]:
+        return "query starts with a dash (needs --)"
+    # Any dash token the CLI does not define. Combined shorts (-rn) are
+    # expanded so a known pair is not misread as unknown.
+    for t in toks:
+        if not t.startswith("-") or t in KNOWN_FLAGS:
+            continue
+        if re.fullmatch(r"-[A-Za-z]+", t) and all(f"-{c}" in KNOWN_FLAGS for c in t[1:]):
+            continue
+        if t.split("=", 1)[0] in KNOWN_FLAGS:
+            continue
+        return "unknown flag"
+    # All flags known and well-formed, so the argv parsed; what failed was the
+    # path. Cannot be re-verified offline — the worktree is gone — but it is
+    # the only remaining explanation for an exit 2.
+    return "bad path (tool correct)"
 
 
 def load_results(path):
@@ -121,11 +177,14 @@ def check_tool(rows, examples):
     n_search = 0
     usage, empty_ranked, unreadable, no_files = [], [], [], []
     traced = 0
+    kinds = Counter()
     for r in rows:
         for e in searches(r):
             n_search += 1
             if e.get("exit") == 2:
-                usage.append((r["instance_id"], e["argv"][:4]))
+                kind = classify_usage(e["argv"])
+                kinds[kind] += 1
+                usage.append((r["instance_id"], kind, e["argv"][:3]))
         for t in traces(r):
             traced += 1
             res, inp = t.get("results", {}), t.get("input", {})
@@ -140,7 +199,14 @@ def check_tool(rows, examples):
                     no_files.append((r["instance_id"], inp.get("root", "")[-46:]))
 
     print(f"  {n_search} semgrep invocations, {traced} engine traces")
-    gate("usage errors (exit 2)", len(usage), MAX_USAGE_ERRORS)
+    if usage:
+        print(f"  ---   {len(usage)} usage errors (exit 2), by cause:")
+        for k, v in kinds.most_common():
+            print(f"          {v:4d}  {k}")
+    gate("usage errors the tool is answerable for", kinds["unknown flag"],
+         MAX_UNKNOWN_FLAG,
+         detail="a rejected path or a malformed argv is the tool being right; "
+                "an unrecognised flag is the compat surface gone short")
     # A missing trace must fail, not pass quietly. Without envelopes the
     # empty-result share is 0/0, which formats as a clean 0% and would sail
     # through the single most important gate here while measuring nothing —
@@ -157,11 +223,13 @@ def check_tool(rows, examples):
     # the diagnosis, and the number that says whether §16.11 is really gone.
     print(f"  ---   of those: {len(unreadable)} had files but read none "
           f"(the §16.11 signature), {len(no_files)} had no files at all")
-    for label, items in (("usage error", usage), ("unreadable scope", unreadable),
-                         ("empty scope", no_files)):
+    for iid, kind, what in usage[:examples]:
+        print(f"          {iid} · {kind} · {what}")
+    for label, items in (("unreadable scope", unreadable), ("empty scope", no_files)):
         for iid, what in items[:examples]:
             print(f"          {label}: {iid} · {what}")
     return {"n_search": n_search, "traced": traced, "usage": len(usage),
+            "usage_by_cause": dict(kinds),
             "empty_ranked": len(empty_ranked), "unreadable": len(unreadable),
             "no_files": len(no_files)}
 
