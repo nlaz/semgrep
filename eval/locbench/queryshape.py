@@ -107,11 +107,23 @@ def print_table(by_cond):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--runs", type=Path, default=DATA / "runs")
+    # A campaign is many timestamped run dirs (one per --resume chunk), so
+    # scoping by --runs alone cannot select it. Without this the default sweeps
+    # every campaign ever run and compares arms across *different instances* —
+    # desc-v5's thousands of historical queries against a new arm's few
+    # hundred, unpaired, which is not a comparison at all.
+    ap.add_argument("--since", default=None, metavar="RUN_ID",
+                    help="only runs whose id sorts >= this (e.g. 20260804-0100)")
     ap.add_argument("--a", default=None, help="treatment arm, for the two-arm delta")
     ap.add_argument("--b", default=None, help="control arm")
     args = ap.parse_args()
 
     rows, _, _ = harvest(args.runs)
+    if args.since:
+        rows = [r for r in rows if str(r.get("run_id", "")) >= args.since]
+        if not rows:
+            print(f"no searches in runs at or after {args.since}")
+            return 1
     queries = defaultdict(list)
     for r in rows:
         # Ranked semgrep only: `rg` has no ranked mode, so including it would
