@@ -339,8 +339,31 @@ def check_harness(rows, results_path):
     free_gb = os.statvfs(DATA).f_bavail * os.statvfs(DATA).f_frsize / 1e9
     gate("free disk (GB)", round(free_gb, 1), 2.0, worse="below",
          detail="a campaign that fills the disk loses the chunk, not the row")
+    # A worktree is only *leaked* once nothing is left to use it. Counting every
+    # tree present made this fire on any campaign still running — an in-flight
+    # instance necessarily has one — and the obvious response to "leaked
+    # worktrees: 3" is to delete them, which during a run destroys the work of
+    # whichever instances happen to be mid-flight. Found exactly that way: three
+    # trees at 2/3, 1/3 and 0/3 arms complete.
+    #
+    # "Nothing left to use it" = the instance already has a row for every
+    # condition this results file contains. An instance with no rows at all is
+    # one that just started, not one abandoned.
     trees = DATA / "repos" / "trees"
-    stray = len(list(trees.iterdir())) if trees.exists() else 0
+    conds = {r.get("condition") for r in rows if r.get("condition")}
+    done = defaultdict(set)
+    for r in rows:
+        if r.get("status") == "ok":
+            done[r.get("instance_id")].add(r.get("condition"))
+    stray, in_use = 0, 0
+    for t in (trees.iterdir() if trees.exists() else []):
+        inst = next((i for i in done if t.name.endswith(i)), None)
+        if inst is not None and conds <= done[inst]:
+            stray += 1
+        else:
+            in_use += 1
+    if in_use:
+        print(f"  ---   {in_use} worktree(s) still in use by unfinished instances")
     gate("leaked worktrees", stray, 0)
     cost = sum((r.get("agent") or {}).get("total_cost_usd") or 0 for r in rows)
     print(f"  ---   spend so far: ${cost:.2f} over {len(rows)} rows")
