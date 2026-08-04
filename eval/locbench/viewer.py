@@ -841,8 +841,8 @@ def build(bundle, out_path):
           <option value="file_acc@5">file_acc@5</option></select>
         <select id="outcome" aria-label="outcome">
           <option value="all">any outcome</option>
-          <option value="sg-only">desc-v5 only</option>
-          <option value="rg-only">rg only</option>
+          <option value="sg-only">{html.escape(ARMS[1])} only</option>
+          <option value="rg-only">{html.escape(ARMS[0])} only</option>
           <option value="both">both found</option>
           <option value="neither">neither found</option>
           <option value="traj">has trajectory</option></select>
@@ -859,10 +859,21 @@ def build(bundle, out_path):
       <div class="panel scroll"><table id="itable"><thead><tr>
         <th data-k="instance_id">instance</th><th data-k="tier">sample</th>
         <th data-k="category">category</th>
-        <th data-k="outcome">rg</th><th data-k="outcome">desc-v5</th>
+        <th data-k="outcome" title="the agent's final answer, by the selected metric">{html.escape(ARMS[0])}</th>
+        <th data-k="outcome" title="the agent's final answer, by the selected metric">{html.escape(ARMS[1])}</th>
         <th data-k="searches" class="num">tool calls</th>
         <th data-k="cost" class="num">cost</th>
         <th>detail</th></tr></thead><tbody id="tbody"></tbody></table></div>
+      <div class="note">
+        <b>found/missed is the agent's final answer</b>, scored by the metric
+        selected above — not whether a search surfaced the right file. Inside a
+        task, <code>gold&nbsp;✓</code> marks a <i>search</i> that returned a gold
+        file. The two disagree often and in both directions: an agent can search
+        up the right file and still name the wrong function
+        (<code>AzureAD…-407</code>, rg) or answer correctly with no search ever
+        flagged gold (the same task, desc-v8). Neither is a bug; they measure
+        different steps.
+      </div>
     </section>
   </div>
 
