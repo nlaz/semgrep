@@ -692,21 +692,51 @@ def run_instance(instance, conditions, run_dir, args, emit):
 # ---------------------------------------------------------------------------
 
 def stratified_sample(rows, limit, seed):
-    """Deterministic sample spread across categories, then repos within each."""
+    """Deterministic sample spread across categories, then repos within each.
+
+    The seed has to actually move the sample. It used to barely: the previous
+    version shuffled each category and then `sort(key=repo)`, and Python's sort
+    is stable, so the shuffle survived only *within* a repo while the repo order
+    came out alphabetical for every seed. Taking from the front then picked the
+    same alphabetically-first repos every time — seed 1 and seed 2 shared 37 of
+    40 instances. Anyone re-running under a new seed to get an independent
+    sample would have got a near-duplicate with nothing saying so.
+
+    Interleaving by repo is still the goal (one repo must not dominate a small
+    sample), so the fix is to shuffle the repo *order* rather than to stop
+    grouping: shuffle within each repo, shuffle the repos, then round-robin.
+    """
     if not limit or limit >= len(rows):
         return rows
     rng = random.Random(seed)
     by_cat = defaultdict(list)
     for r in rows:
         by_cat[r.get("category") or "?"].append(r)
-    for rs in by_cat.values():
-        rng.shuffle(rs)
-        rs.sort(key=lambda r: r["repo"])  # interleave repos after shuffle
-    picked, cats = [], sorted(by_cat)
-    while len(picked) < limit:
+
+    ordered = {}
+    for cat, rs in by_cat.items():
+        by_repo = defaultdict(list)
+        for r in rs:
+            by_repo[r["repo"]].append(r)
+        for group in by_repo.values():
+            rng.shuffle(group)
+        repos = sorted(by_repo)            # sort first so the shuffle, not
+        rng.shuffle(repos)                 # dict order, is what the seed drives
+        # Round-robin across repos: spreads the sample without pinning it to
+        # whichever repo sorts first.
+        interleaved, i = [], 0
+        while len(interleaved) < len(rs):
+            for repo in repos:
+                if i < len(by_repo[repo]):
+                    interleaved.append(by_repo[repo][i])
+            i += 1
+        ordered[cat] = interleaved
+
+    picked, cats = [], sorted(ordered)
+    while len(picked) < limit and any(ordered[c] for c in cats):
         for c in cats:
-            if by_cat[c] and len(picked) < limit:
-                picked.append(by_cat[c].pop(0))
+            if ordered[c] and len(picked) < limit:
+                picked.append(ordered[c].pop(0))
     return picked
 
 
