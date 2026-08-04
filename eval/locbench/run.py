@@ -179,6 +179,30 @@ DESC_CONDITIONS = {
         "backoff_delay(attempt: u32). Ranked, not exhaustive — if the answer "
         "isn't there, rephrase. Read and Glob are also available."
     ),
+    # desc-v8 (§19.2b): desc-v7 with the example's *query* swapped for candidate
+    # identifiers, and nothing else — same framing, same worked result line, so
+    # v7-vs-v8 isolates the style the example demonstrates rather than whether
+    # there is an example at all.
+    #
+    # §19.2b measured why this is the arm to run: on the agent's own ranked
+    # queries, a paraphrase that shares no vocabulary with the gold finds it
+    # 4% of the time, against 46% for an identifier guess that also shares
+    # none. A static bag-of-words model cannot cross from a description to
+    # differently-named code — SIF weights common English words toward zero
+    # (a/(a+p)), so a paraphrase reduces to its rare tokens and has nothing
+    # left when those miss. desc-v7's example demonstrates that failure mode;
+    # this one demonstrates several candidate spellings in one query, which is
+    # what raises the chance of the vocabulary overlap that decides the outcome.
+    "desc-v8": (
+        "The only code search tool available is `semgrep`, a ranked code "
+        "search. Give it anything — an identifier, a phrase, or a question: "
+        "`semgrep \"query\" [path]` returns the most relevant locations as "
+        "path:line:text (top 10; `-k N` for more). Example: semgrep "
+        "\"retry_backoff backoff_delay compute_delay\" → "
+        "src/net/retry.rs:142:fn backoff_delay(attempt: u32). Ranked, not "
+        "exhaustive — if the answer isn't there, rephrase. Read and Glob are "
+        "also available."
+    ),
 }
 
 for _name, _line in DESC_CONDITIONS.items():
