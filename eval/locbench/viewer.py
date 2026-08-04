@@ -35,6 +35,10 @@ except ImportError:  # pragma: no cover - ab_analyze is in-tree
 
 PRIMARY = "func_acc@10_tol"
 SECONDARY = "file_acc@5"
+# (control, treatment). Set from --arms, because these were literals and a
+# campaign that ran anything else rendered a table of n=0 and "+0.000" rather
+# than saying it could not find the arms — and "+0.000" is a real result this
+# project has published, so the failure was indistinguishable from a finding.
 ARMS = ("rg", "desc-v5")
 
 # What a sample lacks the instrumentation to answer, and the figure established
@@ -67,16 +71,20 @@ def scoreboard(bundle):
             if r["status"] != "ok":
                 continue
             by.setdefault(r["instance_id"], {})[r["condition"]] = r
+        control, treatment = ARMS
         ids = [i for i, d in by.items() if all(a in d for a in ARMS)]
-        row = {"tier": tier["name"], "n": len(ids), "metrics": {}}
+        row = {"tier": tier["name"], "n": len(ids), "metrics": {},
+               # Recorded per tier so the page can say "this sample does not
+               # contain these arms" instead of rendering zeros.
+               "arms_present": sorted({c for d in by.values() for c in d})}
         for key in (PRIMARY, SECONDARY):
-            pairs = [(bool((by[i]["desc-v5"]["metrics"] or {}).get(key)),
-                      bool((by[i]["rg"]["metrics"] or {}).get(key))) for i in ids]
+            pairs = [(bool((by[i][treatment]["metrics"] or {}).get(key)),
+                      bool((by[i][control]["metrics"] or {}).get(key))) for i in ids]
             row["metrics"][key] = stat_block(pairs)
             for i in ids:
                 pooled.setdefault(i, {})[key] = (
-                    bool((by[i]["desc-v5"]["metrics"] or {}).get(key)),
-                    bool((by[i]["rg"]["metrics"] or {}).get(key)))
+                    bool((by[i][treatment]["metrics"] or {}).get(key)),
+                    bool((by[i][control]["metrics"] or {}).get(key)))
         row["cost"] = {a: mean([r["cost"] for r in tier["rows"]
                                 if r["condition"] == a and r["status"] == "ok"]) for a in ARMS}
         out.append(row)
@@ -270,10 +278,12 @@ const $ = s => document.querySelector(s);
 const el = (t, c, txt) => { const n = document.createElement(t); if (c) n.className = c;
   if (txt != null) n.textContent = txt; return n; };
 const pct = v => (v * 100).toFixed(1) + '%';
-const ARMS = ['rg', 'desc-v5'];
-const armClass = c => c === 'rg' ? 'arm-rg' : 'arm-sg';
+// [control, treatment], from the bundle so the page follows --arms.
+const ARMS = B.arms && B.arms.length === 2 ? B.arms : ['rg', 'desc-v5'];
+const CTRL = ARMS[0], TREAT = ARMS[1];
+const armClass = c => c === CTRL ? 'arm-rg' : 'arm-sg';
 const bar = k => { const b = el('span', 'armbar');
-  b.style.background = k === 'rg' ? 'var(--rg)' : 'var(--sg)'; return b; };
+  b.style.background = k === CTRL ? 'var(--rg)' : 'var(--sg)'; return b; };
 const short = t => t.replace('results-', '');
 
 $('#theme').onclick = () => {
@@ -430,9 +440,9 @@ function gateCell(c, s, tier) {
 /* ---------- scoreboard ---------- */
 function renderScore() {
   const wrap = el('div', 'panel scroll'), t = el('table');
-  const head = ['sample', 'n', 'metric', 'rg', 'desc-v5', 'delta', 'discordant', '95% CI', 'p'];
+  const head = ['sample', 'n', 'metric', CTRL, TREAT, 'delta', 'discordant', '95% CI', 'p'];
   t.innerHTML = '<thead><tr>' + head.map(h =>
-    `<th class="${['n', 'rg', 'desc-v5', 'delta', 'p'].includes(h) ? 'num' : ''}">${h}</th>`)
+    `<th class="${['n', CTRL, TREAT, 'delta', 'p'].includes(h) ? 'num' : ''}">${h}</th>`)
     .join('') + '</tr></thead>';
   const tb = el('tbody');
   B.scoreboard.forEach(row => {
@@ -443,8 +453,8 @@ function renderScore() {
       const sample = el('td', i ? 'mono' : null, i ? '↳' : row.tier);
       if (i) sample.style.color = 'var(--ink-3)';
       tr.append(sample, el('td', 'num', i ? '' : String(row.n)), el('td', 'mono', k));
-      const c1 = el('td', 'num'); c1.append(bar('rg'), document.createTextNode(m.b.toFixed(3)));
-      const c2 = el('td', 'num'); c2.append(bar('sg'), document.createTextNode(m.a.toFixed(3)));
+      const c1 = el('td', 'num'); c1.append(bar(CTRL), document.createTextNode(m.b.toFixed(3)));
+      const c2 = el('td', 'num'); c2.append(bar(TREAT), document.createTextNode(m.a.toFixed(3)));
       tr.append(c1, c2);
       const d = el('td', 'num delta', (m.delta >= 0 ? '+' : '') + m.delta.toFixed(3));
       d.style.color = Math.abs(m.delta) < 1e-9 ? 'var(--ink-3)'
@@ -489,7 +499,7 @@ function renderTable() {
     }
     if (q && !(p.instance_id.toLowerCase().includes(q) || (p.repo || '').toLowerCase().includes(q)))
       return false;
-    const a = p.arms['desc-v5'], b = p.arms['rg'];
+    const a = p.arms[TREAT], b = p.arms[CTRL];
     const av = a && (a.metrics || {})[metric], bv = b && (b.metrics || {})[metric];
     if (outcome === 'sg-only' && !(av && !bv)) return false;
     if (outcome === 'rg-only' && !(bv && !av)) return false;
@@ -501,7 +511,7 @@ function renderTable() {
   const val = (p, k) => {
     if (k === 'cost') return sum(p, 'cost');
     if (k === 'searches') return sum(p, 'n_searches');
-    if (k === 'outcome') { const a = p.arms['desc-v5'], b = p.arms['rg'];
+    if (k === 'outcome') { const a = p.arms[TREAT], b = p.arms[CTRL];
       return (a && (a.metrics || {})[metric] ? 2 : 0) + (b && (b.metrics || {})[metric] ? 1 : 0); }
     return p[k] ?? '';
   };
@@ -539,7 +549,7 @@ function renderTable() {
     tr.append(el('td', 'num', String(sum(p, 'n_searches'))),
               el('td', 'num', '$' + sum(p, 'cost').toFixed(2)));
     const td = el('td');
-    const has = p.arms['desc-v5'] && p.arms['desc-v5'].has_trajectory;
+    const has = p.arms[TREAT] && p.arms[TREAT].has_trajectory;
     td.append(has ? el('span', 'pill mute', 'open ›')
                   : el('span', 'pill nm', 'summary only'));
     tr.append(td);
@@ -578,11 +588,11 @@ function openSheet(p) {
   } else tp.append(el('div', 'note', 'no problem statement captured for this instance'));
   body.append(tp);
 
-  const gold = (p.arms['desc-v5'] || p.arms['rg'] || {}).gold_files || [];
+  const gold = (p.arms[TREAT] || p.arms[CTRL] || {}).gold_files || [];
   const gp = el('div', 'panel');
   gp.append(el('h2', null, 'gold — where the answer actually lives'));
   gold.forEach(g => gp.append(el('div', 'mono', g)));
-  ((p.arms['desc-v5'] || {}).gold_functions || []).forEach(g => gp.append(el('div', 'mono', g)));
+  ((p.arms[TREAT] || {}).gold_functions || []).forEach(g => gp.append(el('div', 'mono', g)));
   body.append(gp);
 
   const cols = el('div', 'cols');
@@ -773,6 +783,7 @@ addEventListener('hashchange', openFromHash);
 
 
 def build(bundle, out_path):
+    bundle["arms"] = list(ARMS)
     bundle["scoreboard"] = scoreboard(bundle)
     prov = next(iter(bundle.get("provenance", {}).values()), {}) or {}
     payload = json.dumps(bundle, separators=(",", ":")).replace("</", "<\\/")
@@ -898,13 +909,32 @@ def build(bundle, out_path):
 
 
 def main():
+    global ARMS
     ap = argparse.ArgumentParser()
     ap.add_argument("--bundle", type=Path, default=DATA / "viewer-bundle.json")
     ap.add_argument("--out", type=Path, default=DATA / "results-viewer.html")
+    ap.add_argument("--arms", default=",".join(ARMS), metavar="CONTROL,TREATMENT",
+                    help=f"the two conditions to pair (default {','.join(ARMS)})")
     args = ap.parse_args()
     if not args.bundle.exists():
         sys.exit(f"no bundle at {args.bundle} — run eval/locbench/capture.py first")
+
+    arms = tuple(a.strip() for a in args.arms.split(",") if a.strip())
+    if len(arms) != 2:
+        sys.exit(f"--arms needs exactly two conditions, got {args.arms!r}")
+    ARMS = arms
+
     bundle = json.loads(args.bundle.read_text())
+    # Fail loudly rather than rendering a table of zeros. A sample that does not
+    # contain both arms produced n=0 and "+0.000" across every column, which is
+    # indistinguishable from a real null — and this project has published one.
+    present = {r["condition"] for t in bundle.get("tiers", []) if t.get("with_trajectories")
+               for r in t.get("rows", []) if r.get("status") == "ok"}
+    if present and not set(ARMS) <= present:
+        sys.exit(f"--arms {','.join(ARMS)} not in the bundle's traced samples "
+                 f"(found: {', '.join(sorted(present))}). Pass --arms, or capture "
+                 f"the results file that has them with --full.")
+
     n = build(bundle, args.out)
     print(f"wrote {args.out} — {n / 1e6:.2f} MB, "
           f"{sum(t['n_rows'] for t in bundle['tiers'])} rows, "
