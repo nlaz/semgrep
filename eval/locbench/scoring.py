@@ -12,6 +12,8 @@ over-credit from sloppy agent output is auditable rather than silent):
              `Class.method` or vice versa), + leaf-name equality
 """
 
+import re
+import posixpath
 import json
 
 
@@ -125,17 +127,61 @@ def score_instance(answer_files, answer_functions, gold_files, gold_funcs, workt
     return m
 
 
+# Flags that consume the next argv token, so a scope is not confused with a
+# flag's value. Superset across rg and semgrep; a flag missing here can only
+# cost a scope, never invent one.
+_VALUED_FLAGS = {"-k", "--top", "-C", "--context", "-A", "-B", "-M", "--max-columns",
+                 "-g", "--glob", "--include", "-m", "--max-count", "-t", "--type",
+                 "--mode", "-e", "--regexp", "-f", "--file", "--max-depth"}
+_HIT_LINE = re.compile(r"(?m)^([^\s:][^:\n]*):\d+:")
+
+
+def _scopes(argv):
+    """Positional path arguments — what the tool printed its output relative to."""
+    pos, i = [], 0
+    while i < len(argv):
+        a = argv[i]
+        if a.startswith("-"):
+            i += 2 if a in _VALUED_FLAGS else 1
+            continue
+        pos.append(a)
+        i += 1
+    return pos[1:]  # pos[0] is the query/pattern
+
+
+def _rel(path, cwd):
+    if cwd and path.startswith(cwd):
+        path = path[len(cwd):]
+    return path.lstrip("/").lstrip("./")
+
+
 def first_gold_hit_seq(shim_log_path, stdout_dir, gold_files):
-    """Position (1-based) of the first *real* search whose output mentions a
-    gold file path — searches-to-first-useful-hit. Blocked invocations
-    (grep/git steered away) don't count as searches. None = no search ever
-    surfaced a gold file. Matches the path's dir/base tail to tolerate
-    absolute/relative prefixes in tool output."""
+    """Position (1-based) of the first *real* search whose output surfaced a
+    gold file — searches-to-first-useful-hit. Blocked invocations (grep/git
+    steered away) don't count as searches. None = no search ever surfaced one.
+
+    Two matchers, because one tool's output shape defeated the other.
+
+    The tail match (`dir/base` anywhere in the text) tolerates the absolute
+    prefixes rg prints. It cannot see semgrep's output at all when the agent
+    scopes below the repo root: **semgrep prints paths relative to the scope it
+    was given, and rg prints them as passed.** `semgrep q msal/` yields
+    `application.py:162:…` where `rg q msal/` yields `msal/application.py:162:…`,
+    so a two-component tail matches ripgrep and misses semgrep — a systematic
+    undercount of one arm only. On the §19.7 campaign it hid a gold hit in 13 of
+    204 desc-v8 rows against 5 of 204 rg rows, including one where every one of
+    the agent's four searches returned the gold file and the metric read `None`.
+
+    So each result line's path is also rejoined to the invocation's own scope
+    and compared to gold outright. Both matchers are ORed: either is sufficient
+    evidence the search surfaced the file.
+    """
     import pathlib
 
     log = pathlib.Path(shim_log_path)
     if not log.exists():
         return None
+    gold = set(gold_files)
     tails = [g.split("/")[-1] if "/" not in g else "/".join(g.split("/")[-2:]) for g in gold_files]
     rows = []
     for line in log.read_text().splitlines():
@@ -148,7 +194,7 @@ def first_gold_hit_seq(shim_log_path, stdout_dir, gold_files):
         if row.get("blocked"):
             continue
         pos += 1
-        f = pathlib.Path(stdout_dir) / row["stdout_file"]
+        f = pathlib.Path(stdout_dir) / (row.get("stdout_file") or "")
         if not f.exists():
             continue
         try:
@@ -157,4 +203,18 @@ def first_gold_hit_seq(shim_log_path, stdout_dir, gold_files):
             continue
         if any(t in text for t in tails):
             return pos
+        cwd = row.get("cwd") or ""
+        scopes = [_rel(s, cwd) for s in _scopes(row.get("argv") or [])]
+        for m in _HIT_LINE.finditer(text):
+            printed = _rel(m.group(1), cwd)
+            if printed in gold:
+                return pos
+            for s in scopes:
+                if not s:
+                    continue
+                # A file scope prints as its own basename; a dir scope prefixes.
+                if s in gold and printed == s.split("/")[-1]:
+                    return pos
+                if posixpath.normpath(posixpath.join(s, printed)) in gold:
+                    return pos
     return None

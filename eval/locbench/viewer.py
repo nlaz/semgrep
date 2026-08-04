@@ -680,10 +680,20 @@ function renderTimeline(traj, firstHit, gold) {
 
 function markGold(text, gold) {
   let out = String(text).replace(/[&<>]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]));
+  const esc = s => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   (gold || []).forEach(g => {
     if (!g) return;
-    const safe = g.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    out = out.replace(new RegExp(safe, 'g'), m => `<span class="goldmark">${m}</span>`);
+    out = out.replace(new RegExp(esc(g), 'g'), m => `<span class="goldmark">${m}</span>`);
+  });
+  // semgrep prints paths relative to the scope it was given, so a gold file
+  // reached as `semgrep q msal/` appears as `application.py:162:` and the full
+  // path above never matches. Mark the bare basename too — but only where it
+  // leads a result line, never mid-text, or every mention of a common filename
+  // in someone's import statement lights up as the answer.
+  const bases = [...new Set((gold || []).filter(Boolean).map(g => g.split('/').pop()))];
+  bases.forEach(b => {
+    out = out.replace(new RegExp('(^|\\n)(' + esc(b) + ')(?=:\\d+:)', 'g'),
+                      (m, pre, name) => `${pre}<span class="goldmark">${name}</span>`);
   });
   return out;
 }
@@ -868,11 +878,10 @@ def build(bundle, out_path):
         <b>found/missed is the agent's final answer</b>, scored by the metric
         selected above — not whether a search surfaced the right file. Inside a
         task, <code>gold&nbsp;✓</code> marks a <i>search</i> that returned a gold
-        file. The two disagree often and in both directions: an agent can search
-        up the right file and still name the wrong function
-        (<code>AzureAD…-407</code>, rg) or answer correctly with no search ever
-        flagged gold (the same task, desc-v8). Neither is a bug; they measure
-        different steps.
+        file. The two measure different steps and disagree freely:
+        <code>AzureAD…-407</code> is a task where <i>both</i> arms surfaced the
+        gold file on an early search and only one of them then named the right
+        function. Neither column is a bug.
       </div>
     </section>
   </div>
