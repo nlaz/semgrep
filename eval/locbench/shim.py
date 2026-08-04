@@ -48,7 +48,20 @@ def main():
             f"LOCBENCH_BLOCKMSG_{tool.upper()}",
             f"{tool} is unavailable in this environment",
         )
-        out, err, code, wall_ms = b"", (msg + "\n").encode(), 2, 0.0
+        # On BOTH streams, because this is an instruction rather than an error
+        # and it must reach the agent however it wrote the command. Agents pipe
+        # (`grep -l … 2>/dev/null | head`), and stderr-only meant the refusal
+        # was discarded and the agent saw an empty result with no reason for
+        # it — silence that looks like a real answer, which is the §16.11
+        # failure mode this harness exists to catch. Observed live: one tier-1b
+        # agent redirected stderr and got "(Bash completed with no output)".
+        #
+        # Safe on stdout because the message names the tool and says what to do
+        # instead, so it cannot be mistaken for search results, and because
+        # every metric in run.py's search stats skips blocked rows before
+        # counting bytes.
+        payload = (msg + "\n").encode()
+        out, err, code, wall_ms = payload, payload, 2, 0.0
     else:
         t0 = time.perf_counter()
         run_argv = argv + shlex.split(injected) if injected else argv

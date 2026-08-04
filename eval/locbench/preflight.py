@@ -261,12 +261,21 @@ def check_shims():
         for tool, should_work in (("grep", False), ("git", False), ("rg", False)):
             p = subprocess.run([tool, "--version"], capture_output=True, text=True,
                                env=env, timeout=60)
-            blocked = p.returncode == 2 and not p.stdout
+            # A blocked tool exits 2 and puts its refusal on BOTH streams. It
+            # used to be stderr-only, and this check asserted stdout was empty
+            # — until a tier-1b agent wrote `grep -l … 2>/dev/null | head` and
+            # got an empty result with no reason for it. Requiring the message
+            # on stdout is what stops `2>/dev/null` from erasing the steer.
+            blocked = (p.returncode == 2
+                       and "unavailable in this environment" in p.stdout
+                       and "unavailable in this environment" in p.stderr)
             if blocked != (not should_work):
-                fail(f"shim {tool}", f"expected blocked={not should_work}, "
-                                     f"got exit {p.returncode}")
+                fail(f"shim {tool}",
+                     f"expected blocked={not should_work}, got exit {p.returncode}, "
+                     f"stdout={p.stdout.strip()[:50]!r}")
             else:
-                ok(f"shim {tool}", "blocked" if blocked else "passes through")
+                ok(f"shim {tool}",
+                   "blocked, refusal on both streams" if blocked else "passes through")
 
 
 def main():
