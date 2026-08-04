@@ -42,6 +42,7 @@ DATA = HERE.parent / "data" / "locbench"
 sys.path.insert(0, str(HERE))
 
 import run  # noqa: E402  — for DENIAL_MARKER; run.py imports nothing from here
+import scoring  # noqa: E402  — the page must match the published metrics
 
 # Per-run limits. Generous enough that nothing in tier 1 is actually cut (the
 # largest run made 24 searches), tight enough that a 1,115-run campaign would
@@ -174,6 +175,41 @@ def denials_of(d):
         return None
 
 
+def answer_gap(row):
+    """Which gold identifiers the agent named, and which it missed.
+
+    "found / missed" on a task is one bit for an answer that is usually a list:
+    an agent naming 2 of 3 gold functions scores the same zero as one naming
+    none, and the page gave a reader no way to tell those apart. This is the
+    gap itself — per gold item, matched or not, plus what the agent named that
+    was not gold at all.
+
+    Matching goes through `scoring.file_match` / `scoring.func_match` rather
+    than string equality, so the page and the published metrics cannot disagree:
+    the scorer credits a unique-suffix file match and a dot-suffix qualname, and
+    a viewer using `==` would paint a correct answer red.
+    """
+    gold_f = row.get("gold_files") or []
+    gold_fn = [tuple(g.split(":", 1)) for g in (row.get("gold_functions") or []) if ":" in g]
+    pred_f = [scoring.norm_path(str(p)) for p in (row.get("answer_files") or [])]
+    pred_fn, _ = scoring.parse_pred_functions(row.get("answer_functions") or [])
+
+    files = [{"id": g, "found": any(scoring.file_match(p, [g]) for p in pred_f)}
+             for g in gold_f]
+    funcs = []
+    for gp, gq in gold_fn:
+        hit = any(scoring.file_match(pp, [gp]) and scoring.func_match(pq, gq, True)
+                  for pp, pq in pred_fn)
+        funcs.append({"id": f"{gp}:{gq}", "found": hit})
+
+    extra_f = [p for p in pred_f if not scoring.file_match(p, gold_f)]
+    extra_fn = [f"{pp}:{pq}" for pp, pq in pred_fn
+                if not any(scoring.file_match(pp, [gp]) and scoring.func_match(pq, gq, True)
+                           for gp, gq in gold_fn)]
+    return {"files": files, "functions": funcs,
+            "extra_files": extra_f[:10], "extra_functions": extra_fn[:10]}
+
+
 def searches_of(row, d):
     """Each tool invocation: what was typed, what came back, what the engine did.
 
@@ -281,9 +317,34 @@ def timeline_of(d, searches):
 
     search_q = list(searches)          # consumed in order by semgrep/rg calls
     out, dropped, unrecorded = [], 0, 0
+    prev_ts = None
     for e in entries:
         if e.get("type") != "assistant":
             continue
+        # Per-step cost and elapsed, which is what "did the agent navigate
+        # efficiently" actually asks. `timestamp` is on the event and `usage` on
+        # its message, so both are per assistant turn rather than per block —
+        # attached to the first block of the turn so the numbers are not
+        # multiplied across a turn that emitted several.
+        u = (e.get("message") or {}).get("usage") or {}
+        ts = e.get("timestamp")
+        step = {
+            "in": u.get("input_tokens"),
+            "out": u.get("output_tokens"),
+            "cache_read": u.get("cache_read_input_tokens"),
+            "cache_write": u.get("cache_creation_input_tokens"),
+            "ts": ts,
+        }
+        if ts and prev_ts:
+            try:
+                a = datetime.fromisoformat(str(prev_ts).replace("Z", "+00:00"))
+                b = datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
+                step["dt_s"] = round((b - a).total_seconds(), 1)
+            except ValueError:
+                pass
+        if ts:
+            prev_ts = ts
+        first_of_turn = True
         for c in (e.get("message") or {}).get("content") or []:
             kind = c.get("type")
             if kind not in ("text", "thinking", "tool_use"):
@@ -340,6 +401,9 @@ def timeline_of(d, searches):
                         for s in (search_q.pop(0) for _ in
                                   range(min(n_invocations, len(search_q))))]
                 out.append(item)
+            if first_of_turn and out:
+                out[-1]["step"] = step
+                first_of_turn = False
     # Searches the shim logged that no timeline entry claimed. The agent can
     # invoke the tool in shell forms this does not recognise (subshells,
     # backticks), and the transcript can end before the shim log does. They stay
@@ -435,6 +499,9 @@ def capture(full, summary, tasks):
                     # timeline is a narrative rather than an index.
                     "searches": searches,
                     "timeline": timeline,
+                    # Which gold identifiers were named and which were missed —
+                    # the gap behind a single found/missed bit.
+                    "gold_gap": answer_gap(r),
                     "dropped": {"searches": drop_s, "turns": drop_t,
                                 "unrecorded_reasoning": unrec,
                                 "searches_off_timeline": unplaced},

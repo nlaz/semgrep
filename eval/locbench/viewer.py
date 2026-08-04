@@ -171,6 +171,20 @@ header{position:sticky;top:0;z-index:20;background:var(--bg);border-bottom:1px s
   border:1px solid var(--line);color:var(--ink-3);background:var(--panel);white-space:nowrap}
 .chip b{color:var(--ink-2);font-weight:600}
 .chip.bad{color:var(--bad);border-color:var(--bad);background:var(--bad-bg)}
+/* Identifiers: the directory is context, the name is the thing being judged.
+   Dimming the path is what makes a column of long repo-relative paths
+   scannable — the eye lands on the basename and the qualname. */
+.ident{font-family:var(--mono);font-size:12px;display:inline-block;padding:1px 0}
+.ident .idpath{color:var(--ink-3)}
+.ident .idname{color:var(--ink);font-weight:600}
+.ident .idsep{color:var(--ink-3);padding:0 1px}
+.ident .idqual{color:var(--accent);font-weight:600}
+.ident.extra{margin-right:10px;opacity:.85}
+table.gaptbl{width:100%;border-collapse:collapse;margin-top:8px}
+table.gaptbl th{font-size:11px;text-transform:uppercase;letter-spacing:.05em;
+  color:var(--ink-3);text-align:left;padding:4px 8px;border-bottom:1px solid var(--line)}
+table.gaptbl td{padding:4px 8px;border-bottom:1px solid var(--line-soft);vertical-align:top}
+table.gaptbl td.num{text-align:right;white-space:nowrap}
 @media (max-width:820px){.chip.opt{display:none}}
 nav{display:flex;gap:2px;max-width:1360px;margin:0 auto;padding:0 20px}
 nav button{font-family:var(--sans);font-size:13px;padding:7px 13px;border:0;
@@ -297,6 +311,7 @@ $('#theme').onclick = () => {
 const ROWS = [];
 B.tiers.forEach(t => t.rows.forEach(r => ROWS.push({ ...r, tier: t.name })));
 const TIER_META = Object.fromEntries(B.tiers.map(t => [t.name, t]));
+const RUNS = B.runs || {};
 const PAIRS = [];
 {
   const by = new Map();
@@ -614,9 +629,54 @@ function openSheet(p) {
 
   const gold = (p.arms[TREAT] || p.arms[CTRL] || {}).gold_files || [];
   const gp = el('div', 'panel');
-  gp.append(el('h2', null, 'gold — where the answer actually lives'));
-  gold.forEach(g => gp.append(el('div', 'mono', g)));
-  ((p.arms[TREAT] || {}).gold_functions || []).forEach(g => gp.append(el('div', 'mono', g)));
+  gp.append(el('h2', null, 'gold — and which arm named it'));
+  gp.append(el('p', 'sub', 'a task scores one bit, but the answer is a list: '
+    + 'this is which gold identifiers each arm actually named. Matched with the '
+    + 'scorer\u2019s own rules, so it cannot disagree with the metrics.'));
+  /* Gold rows first, each with a per-arm verdict, then whatever each arm named
+     that was not gold — the two halves of "what did it miss and what did it
+     chase instead". */
+  const gg = a => ((RUNS[(p.arms[a] || {}).run_key] || {}).gold_gap) || null;
+  const anyGap = ARMS.map(gg).find(Boolean);
+  if (anyGap) {
+    const tbl = el('table', 'gaptbl');
+    const head = el('tr');
+    head.append(el('th', null, 'gold identifier'));
+    ARMS.forEach(a => head.append(el('th', 'num', a)));
+    // append() returns undefined, so the thead is built before it is attached.
+    const thead = el('thead');
+    thead.append(head);
+    tbl.append(thead);
+    const tb = el('tbody');
+    ['files', 'functions'].forEach(sec => {
+      (anyGap[sec] || []).forEach((row, i) => {
+        const tr = el('tr');
+        tr.append(identCell(row.id, sec === 'files' ? 'file' : 'func'));
+        ARMS.forEach(a => {
+          const mine = ((gg(a) || {})[sec] || [])[i];
+          const td = el('td', 'num');
+          const hit = mine && mine.found;
+          const pill = el('span', 'pill ' + (hit ? 'good' : 'bad'));
+          pill.append(el('span', 'dot'), document.createTextNode(hit ? 'named' : 'missed'));
+          td.append(pill); tr.append(td);
+        });
+        tb.append(tr);
+      });
+    });
+    tbl.append(tb); gp.append(tbl);
+    ARMS.forEach(a => {
+      const g = gg(a); if (!g) return;
+      const extra = [...(g.extra_files || []), ...(g.extra_functions || [])];
+      if (!extra.length) return;
+      const d = el('div', 'note');
+      d.append(document.createTextNode(a + ' also named, not gold: '));
+      extra.forEach(x => d.append(identCell(x, 'extra', true)));
+      gp.append(d);
+    });
+  } else {
+    gold.forEach(g => gp.append(identCell(g, 'file', true)));
+    ((p.arms[TREAT] || {}).gold_functions || []).forEach(g => gp.append(identCell(g, 'func', true)));
+  }
   body.append(gp);
 
   const cols = el('div', 'cols');
@@ -664,14 +724,45 @@ function armColumn(p, arm, gold) {
   return col;
 }
 
+/* A file or function identifier, split so the eye lands on the name rather
+   than the directory it happens to live in. `path/to/file.py:Class.method`
+   renders the leading path dim, the basename and the qualname bright. */
+/* Per-turn cost and elapsed: the numbers behind "did it navigate efficiently".
+   Reasoning text is NOT among them — Claude Code writes a signature and no
+   content for every thinking block (282 of 282 across 60 transcripts), so the
+   output-token count is the only trace of how much thinking a turn did. */
+function stepFacts(st) {
+  const f = el('div', 'facts');
+  const add = (k, v, suf) => { if (v == null) return; const x = el('span', 'fact');
+    x.append(document.createTextNode(k + ' '), el('b', null, String(v) + (suf || '')));
+    f.append(x); };
+  add('+', st.dt_s, 's');
+  add('out', st.out); add('in', st.in);
+  add('cache r', st.cache_read); add('cache w', st.cache_write);
+  return f;
+}
+
+function identCell(id, kind, inline) {
+  const wrap = el(inline ? 'span' : 'td', 'ident ' + kind);
+  const [path, qual] = String(id).split(':');
+  const cut = path.lastIndexOf('/');
+  if (cut > 0) wrap.append(el('span', 'idpath', path.slice(0, cut + 1)));
+  wrap.append(el('span', 'idname', path.slice(cut + 1)));
+  if (qual) { wrap.append(el('span', 'idsep', ':')); wrap.append(el('span', 'idqual', qual)); }
+  return wrap;
+}
+
 /* One ordered list: what it thought, what it ran, what came back. */
 function renderTimeline(traj, firstHit, gold) {
   const tl = el('div', 'tl');
   (traj.timeline || []).forEach(t => {
     if (t.kind === 'thinking' || t.kind === 'text') {
       const ev = el('div', 'ev' + (t.kind === 'thinking' ? ' think' : ''));
-      ev.append(el('div', 'lane', t.kind === 'thinking' ? 'thinks' : 'says'),
-                el('div', 'body', t.text || ''));
+      ev.append(el('div', 'lane', t.kind === 'thinking' ? 'thinks' : 'says'));
+      const bb = el('div', 'body');
+      bb.append(el('div', null, t.text || ''));
+      if (t.step) bb.append(stepFacts(t.step));
+      ev.append(bb);
       tl.append(ev); return;
     }
     /* A single shell call can run the tool more than once, so engine facts are
@@ -682,6 +773,7 @@ function renderTimeline(traj, firstHit, gold) {
     ev.append(el('div', 'lane', isGold ? 'gold ✓' : (t.name || 'runs')));
     const b = el('div', 'body');
     b.append(el('div', 'call', t.input || ''));
+    if (t.step) b.append(stepFacts(t.step));
     if (t.result != null) {
       const res = el('div', 'res');
       res.innerHTML = markGold(t.result, gold);
