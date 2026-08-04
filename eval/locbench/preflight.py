@@ -33,6 +33,7 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
 from collections import Counter
 from pathlib import Path
 
@@ -233,6 +234,34 @@ def check_grep_compat(corpus):
         fail("compat multi-path", f"exit 2: {p.stderr.strip()[:70]!r}")
     else:
         ok("compat multi-path", f"exit {p.returncode} over {len(two)} paths")
+    # A bare trailing `-k`, which is `tar -k`/`df -k` habit rather than any grep
+    # flag: 2 of 1,554 real `-k` uses, and both cost a whole round-trip when it
+    # exited 2. Checked at the end of the line because that is the only place it
+    # can read as bare — a following token is still taken as its value.
+    p, _ = run(["retry backoff", str(corpus), "-k"])
+    if p.returncode == 2:
+        fail("compat bare -k", f"exit 2: {p.stderr.strip()[:70]!r}")
+    else:
+        ok("compat bare -k", f"exit {p.returncode}, {len(p.stdout.splitlines())} hits")
+    # A result line cannot outgrow the reply. Without the cap one minified line
+    # was 73% of every byte the tool printed and truncated away the hits under
+    # it, which reads as a thin result rather than a lost one (FIXES.md #26).
+    #
+    # In a scratch tree rather than the fixture: `tests/corpus` is what the
+    # snapshot tripwire byte-compares against, and a probe file dropped into it
+    # would be a 50 KB line inside the frozen corpus for as long as this check
+    # runs.
+    with tempfile.TemporaryDirectory() as tmp:
+        probe = Path(tmp)
+        (probe / "bundle.min.js").write_text("var retryBackoff=" + "x" * 50_000 + ";\n")
+        (probe / "real.py").write_text("def retry_backoff(attempt):\n    return attempt\n")
+        p, _ = run(["retry backoff", str(probe), "-k", "5"],
+                   {"SEMGREP_CACHE_DIR": str(probe / ".cache")})
+        widest = max((len(l) for l in p.stdout.splitlines()), default=0)
+        if widest > 400:
+            fail("line cap", f"a {widest}-char line reached stdout")
+        else:
+            ok("line cap", f"widest line {widest} chars")
     # The control. If an unknown flag stopped failing, the checks above would
     # pass because argument parsing had gone permissive, not because the flags
     # are handled — and the whole section would be measuring nothing.
@@ -246,7 +275,6 @@ def check_grep_compat(corpus):
 
 def check_shims():
     print("\n[5/5] shim blocks and passes through as configured")
-    import tempfile
     with tempfile.TemporaryDirectory() as td:
         td = Path(td)
         sys.path.insert(0, str(HERE))
