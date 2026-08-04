@@ -26,10 +26,16 @@ project keeps having.
 
 import argparse
 import json
+import re
 import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
+
+# `semgrep` or `rg` in *command* position: at the start, or after a pipe,
+# semicolon, `&&`, or an env-var prefix. Deliberately not a substring test —
+# see the comment at its use site in `timeline_of`.
+INVOKES_SEARCH = re.compile(r"(?:^|[;&|]\s*|\b[A-Z_]+=\S+\s+)(semgrep|rg)\s")
 
 HERE = Path(__file__).parent
 DATA = HERE.parent / "data" / "locbench"
@@ -43,7 +49,26 @@ CAPS = {
     "out_excerpt": 1200,
     "turn_text": 800,
     "thinking": 500,
+    # Problem statements run 1.4 KB median but 55 KB at the tail, and the tail
+    # is one issue thread pasted whole. Bounded so a handful of outliers cannot
+    # dominate the bundle.
+    "problem": 4000,
 }
+
+
+def load_tasks(dataset):
+    """instance_id -> the task the agent was given.
+
+    Kept out of the results rows on purpose: `problem_statement` lives on the
+    dataset, and a reviewer looking at a trajectory cannot judge whether a
+    query was reasonable without seeing what was asked.
+    """
+    out = {}
+    for r in read_jsonl(dataset):
+        ps = r.get("problem_statement")
+        if ps:
+            out[r.get("instance_id")] = clip(ps, CAPS["problem"])
+    return out
 
 
 def read_jsonl(path):
@@ -186,26 +211,112 @@ def searches_of(row, d):
     return out, dropped
 
 
-def turns_of(d):
-    """The agent's own account: reasoning, prose, and the tools it reached for."""
-    out, dropped = [], 0
-    for e in read_jsonl(d / "transcript.jsonl"):
+def _result_text(content):
+    """A tool_result's payload as text. It arrives as a string or as blocks."""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "\n".join(c.get("text", "") for c in content
+                         if isinstance(c, dict) and c.get("type") == "text")
+    return "" if content is None else str(content)
+
+
+def timeline_of(d, searches):
+    """What happened, in the order it happened.
+
+    The transcript is the only record that has the ordering *and* the agent's
+    reasoning, so the timeline is built from it rather than from the shim log.
+    `tool_use.id` and `tool_result.tool_use_id` pair exactly, which is what lets
+    a call and its response sit together instead of in two separate lists the
+    reader has to match up by hand.
+
+    Every tool is kept, not only searches: the agent also runs `Read` and
+    `Glob`, and "searched, then opened *this* file" is most of the story about
+    whether a search actually helped.
+
+    Engine facts are joined onto the semgrep calls in invocation order — the
+    shim log and the transcript record the same calls in the same sequence — so
+    mode / files walked / chunks / hits land under the result they explain.
+    """
+    entries = read_jsonl(d / "transcript.jsonl")
+    # tool_use_id -> result, from the user turns that carry them.
+    results = {}
+    for e in entries:
+        if e.get("type") != "user":
+            continue
+        for c in (e.get("message") or {}).get("content") or []:
+            if isinstance(c, dict) and c.get("type") == "tool_result":
+                results[c.get("tool_use_id")] = c
+
+    search_q = list(searches)          # consumed in order by semgrep/rg calls
+    out, dropped, unrecorded = [], 0, 0
+    for e in entries:
         if e.get("type") != "assistant":
             continue
         for c in (e.get("message") or {}).get("content") or []:
+            kind = c.get("type")
+            if kind not in ("text", "thinking", "tool_use"):
+                continue
+            # 73% of thinking blocks carry a signature and no text — Claude Code
+            # does not persist the reasoning itself in these transcripts. They
+            # are counted, not emitted: 734 blank rows across the bundle would
+            # be noise, but "the agent reasoned here and it was not recorded" is
+            # worth saying once per run rather than pretending it never thought.
+            if kind in ("text", "thinking"):
+                body = c.get("text") if kind == "text" else c.get("thinking")
+                if not (body or "").strip():
+                    unrecorded += 1
+                    continue
             if len(out) >= CAPS["turns"]:
                 dropped += 1
                 continue
-            kind = c.get("type")
             if kind == "text":
                 out.append({"kind": "text", "text": clip(c.get("text", ""), CAPS["turn_text"])})
             elif kind == "thinking":
                 out.append({"kind": "thinking",
                             "text": clip(c.get("thinking", ""), CAPS["thinking"])})
-            elif kind == "tool_use":
-                out.append({"kind": "tool_use", "name": c.get("name"),
-                            "input": clip(json.dumps(c.get("input"))[:400], 400)})
-    return out, dropped
+            else:
+                cmd = (c.get("input") or {}).get("command")
+                item = {
+                    "kind": "tool_use",
+                    "name": c.get("name"),
+                    "input": clip(cmd or json.dumps(c.get("input") or {}), CAPS["turn_text"]),
+                }
+                res = results.get(c.get("id"))
+                if res is not None:
+                    item["result"] = clip(_result_text(res.get("content")), CAPS["out_excerpt"])
+                    item["is_error"] = bool(res.get("is_error"))
+                # A shell call that *invoked* the search tool gets the engine's
+                # own account of it, matched by order.
+                #
+                # The test has to be "is this program semgrep/rg", not "does the
+                # string appear": every worktree path in this campaign contains
+                # `/semgrep/`, so a substring check matched `head -100
+                # /…/semgrep/eval/…/test.py` and popped a real search off the
+                # queue for it. The result was engine facts — mode, files
+                # walked, chunks, hits — displayed under a `head` command, and
+                # every search after it attributed to the wrong call.
+                # …and one shell call can invoke it more than once:
+                # `semgrep "a" x; echo ---; semgrep "b" y` is a single tool_use
+                # and two logged searches. Popping one per call desynced the
+                # queue, so every later call in that run showed the previous
+                # search's engine facts — silently, and plausibly.
+                n_invocations = len(INVOKES_SEARCH.findall(cmd or ""))
+                if n_invocations and search_q:
+                    item["searches"] = [
+                        {k: s.get(k) for k in
+                         ("pos", "exit", "stdout_bytes", "wall_ms", "trace")}
+                        for s in (search_q.pop(0) for _ in
+                                  range(min(n_invocations, len(search_q))))]
+                out.append(item)
+    # Searches the shim logged that no timeline entry claimed. The agent can
+    # invoke the tool in shell forms this does not recognise (subshells,
+    # backticks), and the transcript can end before the shim log does. They stay
+    # visible in the Searches view; the count is carried so the timeline cannot
+    # imply it showed everything.
+    placed = {s["pos"] for e in out for s in (e.get("searches") or [])}
+    unplaced = sum(1 for s in searches if s["pos"] not in placed)
+    return out, dropped, unrecorded, unplaced
 
 
 def provenance_of(d):
@@ -242,7 +353,7 @@ def gate_for(results_path):
     return None
 
 
-def capture(full, summary):
+def capture(full, summary, tasks):
     bundle = {
         "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "caps": CAPS,
@@ -250,6 +361,9 @@ def capture(full, summary):
         "runs": {},
         "gates": {},
         "provenance": {},
+        # Only for instances that have a trajectory: the summary-only tiers are
+        # 1,115 rows and would add ~1.5 MB of text nothing renders.
+        "tasks": {},
     }
     for path, want_traj in [(p, True) for p in full] + [(p, False) for p in summary]:
         if not path.exists():
@@ -264,7 +378,7 @@ def capture(full, summary):
             d = cond_dir(r) if r.get("run_id") else None
             if want_traj and d and d.exists() and r.get("status") == "ok":
                 searches, drop_s = searches_of(r, d)
-                turns, drop_t = turns_of(d)
+                timeline, drop_t, unrec, unplaced = timeline_of(d, searches)
                 # Keyed by TIER as well as instance and condition. Two samples
                 # can share an instance — tier-1a and tier-1b overlap by 7 —
                 # and an instance/condition key silently overwrote 14 of
@@ -280,13 +394,20 @@ def capture(full, summary):
                 bundle["runs"][key] = {
                     "tier": path.stem,
                     "run_id": r["run_id"],
+                    # `searches` stays alongside `timeline`: the Searches view
+                    # and the exit-code filters read a flat list, and the
+                    # timeline is a narrative rather than an index.
                     "searches": searches,
-                    "turns": turns,
-                    "dropped": {"searches": drop_s, "turns": drop_t},
+                    "timeline": timeline,
+                    "dropped": {"searches": drop_s, "turns": drop_t,
+                                "unrecorded_reasoning": unrec,
+                                "searches_off_timeline": unplaced},
                     "provenance": provenance_of(d),
                 }
                 sr["has_trajectory"] = True
                 n_traj += 1
+                if r["instance_id"] in tasks:
+                    bundle["tasks"][r["instance_id"]] = tasks[r["instance_id"]]
                 if not bundle["provenance"].get(path.stem):
                     bundle["provenance"][path.stem] = provenance_of(d)
             tier["rows"].append(sr)
@@ -308,12 +429,15 @@ def main():
     ap.add_argument("--summary", nargs="*", default=["results-scale.jsonl"],
                     help="results files contributing outcome rows only")
     ap.add_argument("--out", type=Path, default=DATA / "viewer-bundle.json")
+    ap.add_argument("--dataset", type=Path, default=DATA / "dataset.jsonl")
     args = ap.parse_args()
 
     full = [DATA / f if not Path(f).is_absolute() else Path(f) for f in args.full]
     summ = [DATA / f if not Path(f).is_absolute() else Path(f) for f in args.summary]
-    print(f"capturing {len(full)} full + {len(summ)} summary results files")
-    bundle = capture(full, summ)
+    tasks = load_tasks(args.dataset)
+    print(f"capturing {len(full)} full + {len(summ)} summary results files "
+          f"({len(tasks)} task statements available)")
+    bundle = capture(full, summ, tasks)
 
     # Round-trip check before writing: every row that claimed a trajectory must
     # have one, and vice versa. Cheap, and it is what caught the key collision.
