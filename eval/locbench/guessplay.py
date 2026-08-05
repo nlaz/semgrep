@@ -433,11 +433,17 @@ def emit_results(raw_path, out_path, config="default"):
 
 
 def _is_file_scope(scope):
-    """A file scope finds no index (cache/mod.rs:74) and, before the §16.11
-    fix, found no gold either - 208 of the v0 corpus's 624 ranked rows are
-    hardcoded zeros. Reported separately, never pooled."""
+    """A file scope finds no index (cache/mod.rs:74), so it is reported apart
+    from directory scopes and never pooled with them.
+
+    Uses the same suffix rule as `score()` and `_abs_hits`. It previously used
+    "is there a dot in the basename", which disagreed with them on exactly one
+    real scope - `.github`, a dotfile DIRECTORY - so scoring and reporting
+    partitioned the corpus differently (4 rows of 30,628, §23.3). Immaterial
+    there and a trap in general: one definition, one place.
+    """
     s = scope or "."
-    return s not in (".", "") and "." in s.rsplit("/", 1)[-1]
+    return s not in (".", "") and bool(PurePosixPath(s).suffix)
 
 
 def _cluster_ci(by_instance, n_resamples=4000, seed=1):
