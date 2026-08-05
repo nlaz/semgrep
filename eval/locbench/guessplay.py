@@ -501,7 +501,7 @@ def compare(raw_path, configs, k=5, field="rank"):
         hit = lambda r: bool(r.get(field) and r[field] <= k)
 
         print(f"\n=== mode={mode}  metric={field}@{k}  (base={base})")
-        hdr = (f"{'arm':<12}{'scope':<12}{'n':>5}{'base':>8}{'cand':>8}{'delta':>8}"
+        hdr = (f"{'arm':<17}{'scope':<11}{'n':>5}{'base':>8}{'cand':>8}{'delta':>8}"
                f"{'cluster 95% CI':>20}   instances  b/c  psi   p")
         print(hdr); print("-" * len(hdr))
         for cand in cands:
@@ -527,14 +527,14 @@ def compare(raw_path, configs, k=5, field="rank"):
                 c_ = sum(1 for v in inst.values() if v[0] and not v[1])
                 psi = (b_ + c_) / len(inst) if inst else 0.0
                 ci = f"[{lo:+.3f}, {hi:+.3f}]" if lo is not None else "-"
-                print(f"{cand:<12}{label:<12}{len(p):>5}{bm:>8.3f}{cm:>8.3f}{pt:>+8.3f}"
+                print(f"{cand:<17}{label:<11}{len(p):>5}{bm:>8.3f}{cm:>8.3f}{pt:>+8.3f}"
                       f"{ci:>20}   {len(inst):>9}  {b_}/{c_}  {psi:.3f}  "
                       f"{_mcnemar(b_, c_):.3f}")
 
         # §21 P3: the dose law predicts the loss shrinks as queries get shorter
         if mode == "semantic":
             print(f"\n  by query length (dir/root only) - the §20.8 dose test")
-            print(f"  {'arm':<12}{'1w':>10}{'2w':>10}{'3-4w':>10}{'5+w':>10}")
+            print(f"  {'arm':<17}{'1w':>10}{'2w':>10}{'3-4w':>10}{'5+w':>10}")
             for cand in cands:
                 pairs = [(v[base], v[cand]) for v in by_gid.values()
                          if base in v and cand in v
@@ -547,7 +547,7 @@ def compare(raw_path, configs, k=5, field="rank"):
                         cells.append(f"{'n<10':>10}"); continue
                     d_ = (sum(hit(c) for _, c in p) - sum(hit(d) for d, _ in p)) / len(p)
                     cells.append(f"{d_:>+7.3f}({len(p):>3})".rjust(10))
-                print(f"  {cand:<12}" + "".join(cells))
+                print(f"  {cand:<17}" + "".join(cells))
 
 
 if __name__ == "__main__":
