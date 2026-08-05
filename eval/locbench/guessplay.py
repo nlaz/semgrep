@@ -40,7 +40,11 @@ sys.path.insert(0, str(HERE.parent))
 
 import ladder  # noqa: E402
 import run as locbench  # noqa: E402
+import scoring  # noqa: E402
+import symbols as symmod  # noqa: E402
 from replay import gold_files, rank_of_gold  # noqa: E402
+
+_SYMS = {}
 
 DATA = HERE.parent / "data" / "locbench"
 QUERIES = HERE.parent / "queries" / "guesses-v0.jsonl"
@@ -65,6 +69,12 @@ CONFIGS = {
                    "search": ["--embed-preproc", "prune-kw"]},
     "prune-decl": {"index": ["--embed-preproc", "prune-decl"],
                    "search": ["--embed-preproc", "prune-decl"]},
+    # §22's 2x2. Both render DOCUMENTS identically; they differ only in whether
+    # the keyword table also fires on the query, which is the axis under test.
+    "prune-kw-pos":    {"index": ["--embed-preproc", "prune-kw-pos"],
+                        "search": ["--embed-preproc", "prune-kw-pos"]},
+    "prune-kw-pos-q0": {"index": ["--embed-preproc", "prune-kw-pos-q0"],
+                        "search": ["--embed-preproc", "prune-kw-pos-q0"]},
     "champion":   {"index": ["--embed-preproc", "split", "--sif"],
                    "search": ["--embed-preproc", "split"],
                    "partial": "sif is index-only; file scopes get split alone"},
@@ -106,6 +116,99 @@ def run_semgrep(tree, scope_rel, query, k, is_exact, mode, cache_dir,
         except json.JSONDecodeError:
             continue
     return hits, None
+
+
+def _abs_hits(hits, scope_rel, tree):
+    """Hits with repo-relative paths, the shape gold entries use.
+
+    Same composition `score()` does, factored out so the file-scope rule that
+    §21.2 got wrong lives in exactly one place: a FILE scope is not a directory
+    and must not be prefixed.
+    """
+    if hits is None:
+        return []
+    if scope_rel in (None, "."):
+        return hits
+    is_file = (tree / scope_rel).is_file() if tree is not None else bool(
+        PurePosixPath(scope_rel).suffix)
+    if is_file:
+        return [{**h, "path": scope_rel} for h in hits]
+    prefix = scope_rel.rstrip("/") + "/"
+    return [{**h, "path": prefix + h.get("path", "")} for h in hits]
+
+
+def _symbols_for(tree, rel):
+    """`symbols.extract` for one repo-relative file, memoized.
+
+    Without the cache every hit re-parses the whole file - a 60-symbol module
+    parsed once per hit per query per config.
+    """
+    key = (str(tree), rel)
+    if key not in _SYMS:
+        f = tree / rel
+        try:
+            _SYMS[key] = symmod.extract(f) if f.is_file() else []
+        except (OSError, ValueError):
+            _SYMS[key] = []
+    return _SYMS[key]
+
+
+def _enclosing(syms, line):
+    """Innermost symbol whose declaration span contains `line`, else None.
+
+    `sig_line..end_line`, not `start_line..end_line`: start_line includes the
+    leading doc/decorator block, so a hit on a docstring above one function
+    would be credited to it. Spans nest (a class encloses its methods), so the
+    innermost - smallest span - is the answer.
+    """
+    best = None
+    for sym in syms:
+        if sym["sig_line"] <= line <= sym["end_line"]:
+            span = sym["end_line"] - sym["sig_line"]
+            if best is None or span < best[0]:
+                best = (span, sym["name"])
+    return best[1] if best else None
+
+
+def rank_of_gold_func(hits, gold_funcs, tree, scope_rel):
+    """1-based rank of the first hit landing in a gold FUNCTION, else None.
+
+    Why this exists: under a file scope every hit carries that one file's path,
+    so `rank_of_gold` is 1-or-absent however the engine orders chunks - the
+    rank histogram over 2,928 file-scoped rows was exactly {1: ..., None: ...}
+    and nothing else. That is a metric artifact, not an engine property (§22.1).
+    Within-file chunk order still decides which FUNCTIONS the agent sees, and
+    `func_acc@10_tol` is the endpoint this project actually reports.
+
+    Tolerant matching only. `symbols.extract` yields bare leaf names and 704 of
+    1,149 gold quals are dotted `Class.method`, so the leaf-name clause of
+    `scoring.func_match` is the bridge and `_strict` is not computable here.
+
+    A hit whose line falls in no extracted symbol is skipped, not counted as a
+    miss: the extractor under-counts by design (multi-line signatures), and
+    conflating "no function here" with "wrong function" would bias every arm
+    identically but silently.
+    """
+    if not gold_funcs:
+        return None
+    for i, h in enumerate(hits, 1):
+        rel = h.get("path", "")
+        if not rel:
+            continue
+        # `line` is the best-matching line WITHIN the chunk. Containment on it,
+        # not span overlap: the 32-line window straddles several small Python
+        # functions, and overlap credit would blunt the very ordering this is
+        # built to measure.
+        line = h.get("line") or h.get("start_line")
+        if not line:
+            continue
+        name = _enclosing(_symbols_for(tree, rel), line)
+        if name is None:
+            continue
+        for gpath, gqual in gold_funcs:
+            if scoring.file_match(rel, [gpath]) and scoring.func_match(name, gqual, True):
+                return i
+    return None
 
 
 def scope_of(row, policy):
@@ -174,13 +277,16 @@ def main():
                          "cell file and exit")
     ap.add_argument("--emit-config", default="default",
                     help="which index config --emit-results should aggregate")
+    ap.add_argument("--compare-metrics", default="rank",
+                    help="rank (gold file) and/or rank_func (gold function)")
     ap.add_argument("--compare", default="",
                     help="BASE,CAND[,CAND...] - print the §21 gate report from "
                          "an existing --out and exit")
     args = ap.parse_args()
 
     if args.compare:
-        compare(args.out, args.compare.split(","))
+        for fld in args.compare_metrics.split(","):
+            compare(args.out, args.compare.split(","), field=fld)
         return
     if args.emit_results:
         emit_results(args.out, args.emit_results, args.emit_config)
@@ -217,6 +323,9 @@ def main():
           f"guess rows; {len(done)} arm-rows already done")
 
     configs = args.configs.split(",")
+    unknown = [c for c in configs if c not in CONFIGS]
+    if unknown:
+        raise SystemExit(f"unknown --configs {unknown}; have {sorted(CONFIGS)}")
     want_modes = tuple(args.modes.split(","))
     scope_policies = args.scopes.split(",")
     tmp = tempfile.TemporaryDirectory(prefix="semgrep-guessplay-cache-")
@@ -227,6 +336,7 @@ def main():
     for n_i, inst_id in enumerate(instances, 1):
         inst = ds[inst_id]
         golds = gold_files(inst)
+        _, gold_funcs = scoring.parse_gold(inst.get("edit_functions") or [])
         if not golds:
             continue
         try:
@@ -278,6 +388,10 @@ def main():
                                 "n_rungs": ladder.parse(row["patterns"])["n_rungs"],
                                 "dead": "\\|" in row["pattern"],
                                 "query": query, "rank": score(hits, golds, sc, tree),
+                                "rank_func": (
+                                    None if is_exact else
+                                    rank_of_gold_func(_abs_hits(hits, sc, tree),
+                                                      gold_funcs, tree, sc)),
                                 "err": err, "bin_sha256": BIN_SHA,
                             }, sort_keys=True) + "\n")
                             out_f.flush()
@@ -362,7 +476,7 @@ def _mcnemar(b, c):
     return min(1.0, 2 * tail / 2 ** n)
 
 
-def compare(raw_path, configs, k=5):
+def compare(raw_path, configs, k=5, field="rank"):
     """The §21 phase-1 gate report.
 
     The gate is psi_offline - the share of INSTANCES whose outcome the arm
@@ -384,9 +498,9 @@ def compare(raw_path, configs, k=5):
         by_gid = defaultdict(dict)
         for r in sel:
             by_gid[r["gid"]][r["config"]] = r
-        hit = lambda r: bool(r.get("rank") and r["rank"] <= k)
+        hit = lambda r: bool(r.get(field) and r[field] <= k)
 
-        print(f"\n=== mode={mode}  (base={base})")
+        print(f"\n=== mode={mode}  metric={field}@{k}  (base={base})")
         hdr = (f"{'arm':<12}{'scope':<12}{'n':>5}{'base':>8}{'cand':>8}{'delta':>8}"
                f"{'cluster 95% CI':>20}   instances  b/c  psi   p")
         print(hdr); print("-" * len(hdr))
