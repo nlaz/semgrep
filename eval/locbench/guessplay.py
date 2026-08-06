@@ -357,11 +357,17 @@ def main():
     ap.add_argument("--compare", default="",
                     help="BASE,CAND[,CAND...] - print the §21 gate report from "
                          "an existing --out and exit")
+    ap.add_argument("--compare-by", default="config",
+                    choices=("config", "arm_flags"),
+                    help="what a compared arm is: the rendering config "
+                         "(§21-§23) or the search flags (§24's factorial). "
+                         "With arm_flags, name the control as '' (empty)")
     args = ap.parse_args()
 
     if args.compare:
         for fld in args.compare_metrics.split(","):
-            compare(args.out, args.compare.split(","), field=fld)
+            compare(args.out, args.compare.split(","), field=fld,
+                    by=args.compare_by)
         return
     if args.emit_results:
         emit_results(args.out, args.emit_results, args.emit_config)
@@ -592,8 +598,13 @@ def _mcnemar(b, c):
     return min(1.0, 2 * tail / 2 ** n)
 
 
-def compare(raw_path, configs, k=5, field="rank"):
+def compare(raw_path, configs, k=5, field="rank", by="config"):
     """The §21 phase-1 gate report.
+
+    `by` selects what an "arm" is: `config` (the rendering, §21-§23) or
+    `arm_flags` (the search flags, §24's factorial). Same report either way —
+    the contrast is between two values of one column, and which column is the
+    only thing that changes.
 
     The gate is psi_offline - the share of INSTANCES whose outcome the arm
     changes - not offline recall. Recall is the quantity §9.7, §10.6 and §14.5
@@ -603,7 +614,7 @@ def compare(raw_path, configs, k=5, field="rank"):
     """
     base, cands = configs[0], configs[1:]
     rows = [json.loads(l) for l in raw_path.read_text().splitlines()]
-    shas = {r.get("bin_sha256") for r in rows if r.get("config") in configs}
+    shas = {r.get("bin_sha256") for r in rows if r.get(by) in configs}
     print(f"corpus: {raw_path.name}")
     print(f"binaries: {sorted(x for x in shas if x)}"
           f"{'   <-- TRIPWIRE: more than one binary produced these rows' if len(shas) > 1 else ''}")
@@ -613,7 +624,7 @@ def compare(raw_path, configs, k=5, field="rank"):
                and r.get("mode") == mode and r.get("scope_policy") == "orig"]
         by_gid = defaultdict(dict)
         for r in sel:
-            by_gid[r["gid"]][r["config"]] = r
+            by_gid[r["gid"]][r.get(by, "")] = r
         hit = lambda r: bool(r.get(field) and r[field] <= k)
 
         print(f"\n=== mode={mode}  metric={field}@{k}  (base={base})")
