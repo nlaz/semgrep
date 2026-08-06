@@ -235,7 +235,12 @@ DESC_CONDITIONS = {
 # Arms whose agent is told to type something other than `semgrep`. The binary is
 # the same either way (`sg` and `semgrep` are two [[bin]] targets over one
 # source); only the name in the description and on PATH differs.
-ARM_TOOL = {"desc-v9": "sg"}
+# §25's display-format arms. Named here, before ARM_TOOL, because every one of
+# them types `sg` and ALLOWED is derived from ARM_TOOL — an arm missing from it
+# would have every search denied.
+DISPLAY_CONDITIONS = ("disp-line", "disp-full", "disp-head")
+
+ARM_TOOL = {"desc-v9": "sg", **{n: "sg" for n in DISPLAY_CONDITIONS}}
 
 # Every search-tool name the shims cover. `sg` is here so its shim exists for
 # every arm, not only desc-v9 — an arm that mentions a name with no shim behind
@@ -245,11 +250,25 @@ SHIMMED_SEARCH_TOOLS = ("rg", "semgrep", "search", "sg")
 for _name, _line in DESC_CONDITIONS.items():
     TOOL_LINES[_name] = _line + UNAVAILABLE
 
+# The display arms inherit desc-v9's line verbatim. Byte-identical across the
+# three by construction rather than by copy-paste, which is what §25.1's
+# tripwire 7 asserts on the recorded runs.
+for _name in DISPLAY_CONDITIONS:
+    TOOL_LINES[_name] = TOOL_LINES["desc-v9"]
+
 # A/B engine conditions: name -> semgrep flags injected by the shim.
 # sg-sif additionally gets a --sif --sif-a 1e-4 index (built last per
 # instance since it replaces the worktree's .semgrep).
 SG_ENGINE_CONDITIONS = {
     "sg-plain": "",
+    # §25's display arms. The engine flag is injected by the shim and never
+    # shown to the agent, so these three differ from each other in exactly one
+    # thing: what came back. `disp-line` is the control and is NOT the same as
+    # reusing old desc-v9 rows — those came from a pre-§24 binary, and comparing
+    # across binaries is the §23.3 contamination trap.
+    "disp-line": "",
+    "disp-full": "--full",
+    "disp-head": "--headers",
     "sg-mx48": "--maxsim --maxsim-pool 48",
     "sg-mx96": "--maxsim",
     "sg-sif": "--maxsim",
@@ -258,15 +277,20 @@ SG_ENGINE_CONDITIONS = {
     # (tree-sitter function chunking, §11) both lost and were removed from
     # the tree. sg-p256 became the shipped default, so it is now sg-plain.
 }
+# §25's display arms carry the SHIPPED description, not V4_LINE: the campaign
+# asks what the display format does to the product as it exists, and desc-v9 is
+# the product. Their TOOL_LINES are assigned below, once DESC_CONDITIONS exists,
+# so there is exactly one copy of that text; this loop covers the older arms.
 for _name in SG_ENGINE_CONDITIONS:
-    TOOL_LINES[_name] = V4_LINE + UNAVAILABLE
+    if _name not in DISPLAY_CONDITIONS:
+        TOOL_LINES[_name] = V4_LINE + UNAVAILABLE
 
 ALLOWED = {
     "rg": ["Bash(rg *)"],
     "semgrep": ["Bash(semgrep *)"],
     "search": ["Bash(search *)"],
     "both": ["Bash(rg *)", "Bash(semgrep *)"],
-    **{name: ["Bash(semgrep *)"] for name in SG_ENGINE_CONDITIONS},
+    **{name: [f"Bash({ARM_TOOL.get(name, 'semgrep')} *)"] for name in SG_ENGINE_CONDITIONS},
     **{name: ["Bash(semgrep *)"] for name in CAPTURE_CONDITIONS},
     # Derived from tool_of so an arm that types `sg` is permitted `sg`, not
     # `semgrep` — a mismatch here denies every search in the arm.
