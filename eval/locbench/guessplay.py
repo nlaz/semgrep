@@ -345,7 +345,10 @@ def main():
                          "search, on top of the config's own. The §24 factorial "
                          "arms (--dedupe-overlap, --file-scope-window, "
                          "--decl-boost) ride here rather than forking CONFIGS, "
-                         "which is for rendering")
+                         "which is for rendering. Separate several arms with "
+                         "';' and they are all measured inside ONE pass over "
+                         "the instances — 8 arms otherwise means creating and "
+                         "destroying every worktree 8 times")
     ap.add_argument("--compare-metrics", default="rank",
                     help="rank (gold file), rank_func (gold function, strict "
                          "line containment) and/or rank_func_ovl (gold "
@@ -409,6 +412,9 @@ def main():
     if unknown:
         raise SystemExit(f"unknown --configs {unknown}; have {sorted(CONFIGS)}")
     want_modes = tuple(args.modes.split(","))
+    # One pass over the instances measures every arm, so a worktree is created
+    # and destroyed once rather than once per arm.
+    arm_flag_sets = [a.strip() for a in args.extra_search_flags.split(";")]
     scope_policies = args.scopes.split(",")
     tmp = tempfile.TemporaryDirectory(prefix="semgrep-guessplay-cache-")
     cache_dir = Path(tmp.name)
@@ -465,19 +471,20 @@ def main():
                         if is_exact and config != "default":
                             continue  # keyword path ignores index AND flag
                         for mode in modes:
+                          for arm_flags in arm_flag_sets:
                             # `arm_flags` is part of the identity, not decoration:
                             # without it two factorial arms differing only in
                             # --dedupe-overlap share a key, and the second is
                             # skipped as "already done" — a silent contamination
                             # of exactly the §23.3 kind, reported as a null.
                             key = (gid(row), arm, mode or "-", config, policy,
-                                   BIN_SHA, args.extra_search_flags)
+                                   BIN_SHA, arm_flags)
                             if key in done:
                                 continue
                             hits, err = run_semgrep(
                                 tree, sc, query, args.k, is_exact, mode, cache_dir,
                                 search_flags=[*CONFIGS[config]["search"],
-                                              *args.extra_search_flags.split()])
+                                              *arm_flags.split()])
                             out_f.write(json.dumps({
                                 "gid": gid(row), "instance_id": inst_id,
                                 "kind": row["kind"], "condition": row["condition"],
@@ -495,7 +502,7 @@ def main():
                                     rank_of_gold_func_ovl(_abs_hits(hits, sc, tree),
                                                           gold_funcs, tree, sc)),
                                 "err": err, "bin_sha256": BIN_SHA,
-                                "arm_flags": args.extra_search_flags,
+                                "arm_flags": arm_flags,
                             }, sort_keys=True) + "\n")
                             out_f.flush()
                             n_run += 1
