@@ -170,6 +170,63 @@ def _enclosing(syms, line):
     return best[1] if best else None
 
 
+def _gold_spans(syms, gold_funcs, rel):
+    """`(sig_line, end_line)` of every extracted symbol that IS a gold function.
+
+    Name first, span second — the reverse of [`_enclosing`], and deliberately.
+    `_enclosing` asks "which function is this line in", which is what makes the
+    strict metric strict; this asks "where is the function we are hunting", which
+    is the question the overlap metric needs.
+    """
+    out = []
+    for sym in syms:
+        for gpath, gqual in gold_funcs:
+            if scoring.file_match(rel, [gpath]) and scoring.func_match(sym["name"], gqual, True):
+                out.append((sym["sig_line"], sym["end_line"]))
+                break
+    return out
+
+
+def rank_of_gold_func_ovl(hits, gold_funcs, tree, scope_rel):
+    """1-based rank of the first hit whose CHUNK overlaps a gold function.
+
+    The companion to [`rank_of_gold_func`], and the two bracket the truth rather
+    than either being it (RESEARCH.md §24.1).
+
+    `rank_of_gold_func` credits a hit only when the chunk's best-matching *line*
+    falls inside the gold function. Chunks are 32 lines and the median gold
+    function is 12, so a returned chunk routinely contains the gold function
+    *and* several of its neighbours, and the credit then turns on which single
+    line inside that chunk happened to match best. Measured over the 2,149
+    file-scoped agent searches §24 reproduced, strict scores 52.9% @5 and this
+    scores 67.1% - a 14.2pp bracket, widening to +19.8pp on gold functions under
+    10 lines and narrowing to +6.8pp on 30-99 line ones. That profile is the
+    signature of chunk granularity, not of ranking.
+
+    **Neither number is the truth.** Strict under-credits short functions;
+    overlap over-credits a window that straddles neighbours - a 32-line chunk
+    can "find" a 3-line function it merely brushes. §22.1 chose strict
+    deliberately, because overlap credit "would blunt the very ordering this is
+    built to measure", and that reasoning still holds. What it did not
+    anticipate was the *size* of the resulting understatement, which is larger
+    than every effect §20-§23 tried to detect. So both are emitted, always, and
+    a result that moves only one of them is a result about the metric.
+    """
+    if not gold_funcs:
+        return None
+    for i, h in enumerate(hits, 1):
+        rel = h.get("path", "")
+        if not rel:
+            continue
+        s, e = h.get("start_line"), h.get("end_line")
+        if not s or not e:
+            continue
+        for gs, ge in _gold_spans(_symbols_for(tree, rel), gold_funcs, rel):
+            if s <= ge and gs <= e:
+                return i
+    return None
+
+
 def rank_of_gold_func(hits, gold_funcs, tree, scope_rel):
     """1-based rank of the first hit landing in a gold FUNCTION, else None.
 
@@ -277,8 +334,23 @@ def main():
                          "cell file and exit")
     ap.add_argument("--emit-config", default="default",
                     help="which index config --emit-results should aggregate")
+    ap.add_argument("--file-scopes-only", action="store_true",
+                    help="score only file-scoped ranked rows and skip the "
+                         "per-config index build they never read (§24). Turns "
+                         "an hours-long arm into ~10 minutes; blind to the "
+                         "directory half by construction, so a candidate that "
+                         "passes here still needs a full-corpus confirmation")
+    ap.add_argument("--extra-search-flags", default="",
+                    help="space-separated flags appended to every ranked "
+                         "search, on top of the config's own. The §24 factorial "
+                         "arms (--dedupe-overlap, --file-scope-window, "
+                         "--decl-boost) ride here rather than forking CONFIGS, "
+                         "which is for rendering")
     ap.add_argument("--compare-metrics", default="rank",
-                    help="rank (gold file) and/or rank_func (gold function)")
+                    help="rank (gold file), rank_func (gold function, strict "
+                         "line containment) and/or rank_func_ovl (gold "
+                         "function, chunk overlap). The last two bracket "
+                         "rather than either being the truth — §24.1")
     ap.add_argument("--compare", default="",
                     help="BASE,CAND[,CAND...] - print the §21 gate report from "
                          "an existing --out and exit")
@@ -300,6 +372,15 @@ def main():
 
     rows = [json.loads(l) for l in args.corpus.read_text().splitlines()]
     rows = [r for r in rows if r["instance_id"] in ds]
+    if args.file_scopes_only:
+        # A file-scoped search never reads an index (`cache::discover` bails on a
+        # non-directory root, cache/mod.rs:74), so for these rows the per-config
+        # `semgrep index` below is pure cost. Dropping it is what turns an
+        # hours-long arm into a ~10-minute one, which is what makes the §24
+        # factorial affordable. Only the primary policy is scoped here: `root`
+        # rewrites every scope to ".", which is a directory by definition.
+        rows = [r for r in rows
+                if r["kind"] == "guess_ranked" and _is_file_scope(scope_of(r, "orig"))]
     by_instance = defaultdict(list)
     for r in rows:
         by_instance[r["instance_id"]].append(r)
@@ -316,7 +397,8 @@ def main():
             try:
                 e = json.loads(line)
                 done.add((e["gid"], e["arm"], e["mode"], e["config"],
-                          e["scope_policy"], e.get("bin_sha256")))
+                          e["scope_policy"], e.get("bin_sha256"),
+                          e.get("arm_flags", "")))
             except (json.JSONDecodeError, KeyError):
                 continue
     print(f"{len(instances)} instances, {sum(len(by_instance[i]) for i in instances)} "
@@ -346,24 +428,34 @@ def main():
         except Exception as e:  # noqa: BLE001
             print(f"  skip {inst_id}: {type(e).__name__}: {e}")
             continue
+        # Does any row for this instance actually need an index? Under
+        # --file-scopes-only none do, and the build is skipped rather than paid
+        # for and ignored. Computed per instance, not globally, so a mixed
+        # corpus still builds wherever a directory-scoped row exists.
+        needs_index = any(not _is_file_scope(scope_of(r, p))
+                          for r in by_instance[inst_id] for p in scope_policies)
         for config in configs:
             # One index per (worktree, config); exact arms don't read it but
             # ranked arms must all see the same build within a config.
             flags = CONFIGS[config]["index"]
-            subprocess.run([str(locbench.SEMGREP), "index", str(tree), *flags],
-                           check=True, capture_output=True, timeout=600)
-            # Readback: a failed or ignored build used to degrade silently into
-            # "measured the previous config", which is indistinguishable from a
-            # null. Assert the index is in the space the arm asked for.
-            got = json.loads((tree / ".semgrep" / "meta.json").read_text())
-            want_pp = "none"
-            if "--embed-preproc" in flags:
-                want_pp = flags[flags.index("--embed-preproc") + 1]
-            assert got.get("embed_preproc", "none") == want_pp and \
-                   got.get("sif", False) == ("--sif" in flags), (
-                       f"{config}: index built as "
-                       f"{got.get('embed_preproc')}/sif={got.get('sif')}, "
-                       f"wanted {want_pp}/sif={'--sif' in flags}")
+            if needs_index:
+                subprocess.run([str(locbench.SEMGREP), "index", str(tree), *flags],
+                               check=True, capture_output=True, timeout=600)
+                # Readback: a failed or ignored build used to degrade silently
+                # into "measured the previous config", which is
+                # indistinguishable from a null. Assert the index is in the
+                # space the arm asked for. Only meaningful when one was built —
+                # skipping the assert with no index is correct; skipping it with
+                # one is how the failure it guards against gets back in.
+                got = json.loads((tree / ".semgrep" / "meta.json").read_text())
+                want_pp = "none"
+                if "--embed-preproc" in flags:
+                    want_pp = flags[flags.index("--embed-preproc") + 1]
+                assert got.get("embed_preproc", "none") == want_pp and \
+                       got.get("sif", False) == ("--sif" in flags), (
+                           f"{config}: index built as "
+                           f"{got.get('embed_preproc')}/sif={got.get('sif')}, "
+                           f"wanted {want_pp}/sif={'--sif' in flags}")
             for row in by_instance[inst_id]:
                 for policy in scope_policies:
                     if config != "default" and policy != scope_policies[0]:
@@ -373,13 +465,19 @@ def main():
                         if is_exact and config != "default":
                             continue  # keyword path ignores index AND flag
                         for mode in modes:
+                            # `arm_flags` is part of the identity, not decoration:
+                            # without it two factorial arms differing only in
+                            # --dedupe-overlap share a key, and the second is
+                            # skipped as "already done" — a silent contamination
+                            # of exactly the §23.3 kind, reported as a null.
                             key = (gid(row), arm, mode or "-", config, policy,
-                                   BIN_SHA)
+                                   BIN_SHA, args.extra_search_flags)
                             if key in done:
                                 continue
                             hits, err = run_semgrep(
                                 tree, sc, query, args.k, is_exact, mode, cache_dir,
-                                search_flags=CONFIGS[config]["search"])
+                                search_flags=[*CONFIGS[config]["search"],
+                                              *args.extra_search_flags.split()])
                             out_f.write(json.dumps({
                                 "gid": gid(row), "instance_id": inst_id,
                                 "kind": row["kind"], "condition": row["condition"],
@@ -392,7 +490,12 @@ def main():
                                     None if is_exact else
                                     rank_of_gold_func(_abs_hits(hits, sc, tree),
                                                       gold_funcs, tree, sc)),
+                                "rank_func_ovl": (
+                                    None if is_exact else
+                                    rank_of_gold_func_ovl(_abs_hits(hits, sc, tree),
+                                                          gold_funcs, tree, sc)),
                                 "err": err, "bin_sha256": BIN_SHA,
+                                "arm_flags": args.extra_search_flags,
                             }, sort_keys=True) + "\n")
                             out_f.flush()
                             n_run += 1
