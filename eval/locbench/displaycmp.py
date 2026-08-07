@@ -52,7 +52,17 @@ def walk(path):
             ev = json.loads(line)
         except json.JSONDecodeError:
             continue
-        for b in ((ev.get("message") or {}).get("content") or []):
+        # `message` is usually a dict, and sometimes a bare string — an
+        # interrupted run writes at least one such line, so a walker that
+        # assumes the common shape dies on exactly the campaigns worth
+        # analysing. Same for `content`, which can be a string.
+        if not isinstance(ev, dict):
+            continue
+        msg = ev.get("message")
+        blocks = msg.get("content") if isinstance(msg, dict) else None
+        if not isinstance(blocks, list):
+            continue
+        for b in blocks:
             if not isinstance(b, dict):
                 continue
             if b.get("type") == "tool_use":
@@ -104,11 +114,20 @@ def metrics(path, tool):
     }
 
 
-def collect(runs_dir, tool_of):
-    """-> {(run, instance): {condition: metrics}} for every transcript on disk."""
+def collect(runs_dir, tool_of, frame=None):
+    """-> {(run, instance): {condition: metrics}} for transcripts on disk.
+
+    `frame` restricts to a registered instance list. Without it the walk picks
+    up every run ever made, including the smoke runs that sized the campaign —
+    which are the same arms and the same binary, and still not the frame that
+    was registered. Mixing them would quietly enlarge n with instances chosen
+    after the fact.
+    """
     out = defaultdict(dict)
     for fp in Path(runs_dir).glob("*/*/*/transcript.jsonl"):
         cond, inst, run = fp.parts[-2], fp.parts[-3], fp.parts[-4]
+        if frame is not None and inst not in frame:
+            continue
         out[(run, inst)][cond] = metrics(fp, tool_of(cond))
     return out
 
@@ -123,7 +142,10 @@ def line(label, pairs):
         return f"  {label:<26} (n={len(pairs)}, too few paired runs)"
     a = st.mean(x for x, _ in pairs)
     b = st.mean(y for _, y in pairs)
-    d, lo, hi = boot_ci(pairs)
+    # `boot_ci` returns mean(first) - mean(second), so the pairs go in swapped:
+    # every heading here reads "cand - base", and a Δ carrying the opposite
+    # sign to its own label is how a reduction gets published as an increase.
+    d, lo, hi = boot_ci([(y, x) for x, y in pairs])
     sd = st.pstdev([y - x for x, y in pairs])
     star = " " if lo <= 0 <= hi else "*"
     return (f"  {label:<26} n={len(pairs):>4}  base={a:>8.3f} cand={b:>8.3f}  "
@@ -135,12 +157,21 @@ def main():
     ap.add_argument("--runs", type=Path, default=DATA / "runs")
     ap.add_argument("--arms", default="disp-line,disp-full,disp-head,rg")
     ap.add_argument("--base", default="disp-line")
+    ap.add_argument("--frame", type=Path, default=None,
+                    help="registered instance list (display-frame-280.json); "
+                         "without it every run on disk is included, smoke "
+                         "runs among them")
     ap.add_argument("--baseline-only", action="store_true",
                     help="report §25.1's power inputs from existing campaigns")
     args = ap.parse_args()
 
     import run as locbench
-    data = collect(args.runs, lambda c: locbench.ARM_TOOL.get(c, "rg" if c == "rg" else "semgrep"))
+    frame = None
+    if args.frame:
+        frame = set(json.loads(args.frame.read_text())["instances"])
+    data = collect(args.runs,
+                   lambda c: locbench.ARM_TOOL.get(c, "rg" if c == "rg" else "semgrep"),
+                   frame if not args.baseline_only else None)
 
     if args.baseline_only:
         print("§25.1 power inputs, recomputed from the transcripts on disk:\n")
@@ -157,6 +188,13 @@ def main():
 
     arms = args.arms.split(",")
     print(f"=== §25 display campaign — base={args.base} ===")
+    print(f"frame: {args.frame.name if args.frame else 'ALL RUNS ON DISK (unfiltered)'}"
+          f"  ·  {len(data)} instance-runs")
+    # One n for every contrast, or arms that happened to finish more instances
+    # look better for having done so.
+    common = {k for k, v in data.items() if all(a in v for a in arms)}
+    print(f"complete in all {len(arms)} arms: {len(common)}\n")
+    data = {k: v for k, v in data.items() if k in common}
     present = {c for v in data.values() for c in v}
     for cand in [a for a in arms if a != args.base]:
         if cand not in present:
