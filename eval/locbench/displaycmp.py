@@ -123,12 +123,23 @@ def collect(runs_dir, tool_of, frame=None):
     was registered. Mixing them would quietly enlarge n with instances chosen
     after the fact.
     """
-    out = defaultdict(dict)
-    for fp in Path(runs_dir).glob("*/*/*/transcript.jsonl"):
+    # Keyed by INSTANCE, not (run, instance). A campaign that resumes writes a
+    # new run directory each time, so an instance's arms routinely land in
+    # different runs — pairing on the run id then silently drops them. On the
+    # §25 frame that cost 53 of 278 instances, a fifth of what was paid for.
+    # Latest run wins per (instance, condition), which is `ab_analyze.load`'s
+    # rule and so the one convention in the harness.
+    seen = {}
+    for fp in sorted(Path(runs_dir).glob("*/*/*/transcript.jsonl")):
         cond, inst, run = fp.parts[-2], fp.parts[-3], fp.parts[-4]
         if frame is not None and inst not in frame:
             continue
-        out[(run, inst)][cond] = metrics(fp, tool_of(cond))
+        prev = seen.get((inst, cond))
+        if prev is None or run >= prev[0]:
+            seen[(inst, cond)] = (run, fp)
+    out = defaultdict(dict)
+    for (inst, cond), (_run, fp) in seen.items():
+        out[inst][cond] = metrics(fp, tool_of(cond))
     return out
 
 
