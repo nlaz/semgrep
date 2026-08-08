@@ -238,7 +238,8 @@ DESC_CONDITIONS = {
 # §25's display-format arms. Named here, before ARM_TOOL, because every one of
 # them types `sg` and ALLOWED is derived from ARM_TOOL — an arm missing from it
 # would have every search denied.
-DISPLAY_CONDITIONS = ("disp-line", "disp-full", "disp-head")
+DISPLAY_CONDITIONS = ("disp-line", "disp-full", "disp-head",
+                      "pl-1", "pl-18", "pl-full", "pl-18k5")
 
 ARM_TOOL = {"desc-v9": "sg", **{n: "sg" for n in DISPLAY_CONDITIONS}}
 
@@ -269,6 +270,13 @@ SG_ENGINE_CONDITIONS = {
     "disp-line": "",
     "disp-full": "--full",
     "disp-head": "--headers",
+    # §26's passage-width arms. Every one names its width explicitly so no arm
+    # inherits the shipped default — a control that relied on it would silently
+    # become the treatment the day the default moved again.
+    "pl-1": "--passage-lines 1",
+    "pl-18": "--passage-lines 18",
+    "pl-full": "--full",
+    "pl-18k5": "--passage-lines 18 -k 5",
     "sg-mx48": "--maxsim --maxsim-pool 48",
     "sg-mx96": "--maxsim",
     "sg-sif": "--maxsim",
