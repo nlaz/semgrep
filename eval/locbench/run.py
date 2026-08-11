@@ -251,6 +251,39 @@ DESC_CONDITIONS = {
         "exhaustive — if the answer isn't there, rephrase. Read and Glob are "
         "also available."
     ),
+    # desc-v11 (§30.3): v10 plus the exact-match escape hatch, ROUTED. The §30
+    # pilot measured sg-arm agents reaching for shell grep 1.2×/session — the
+    # single largest cost in the campaign — and the blocked argvs split into
+    # exactly two intents: verify/enumerate a known identifier (single-token
+    # literals, -e's actual job) and OR-of-candidates regexes
+    # (`getCachedChildren\|getCachedTrashed\|…`), which the ranked multi-word
+    # query they were already taught serves better. So the clause routes three
+    # ways and states the default explicitly.
+    #
+    # This deliberately walks back §16.10's blanket rule ("never name -e"),
+    # with eyes open: that lesson was measured on an UNCONDITIONAL footer
+    # mention with the caller's own query interpolated, in an additive regime.
+    # Here the mention is conditional ("only to verify or count"), framed
+    # inside a ranked-first identity, and the campaign registers exact-share
+    # as a tripwire diagnostic — if agents collapse onto -e, that is the §16.10
+    # effect reasserting itself and the variant dies as v6 and v7 did.
+    "desc-v11": (
+        "The only code search tool available is `sg`, a ranked code search "
+        "you run with Bash. Give it anything — an identifier, a phrase, or a "
+        "question: `sg \"query\"` searches the whole repository and returns "
+        "the most relevant locations as path:line:text (top 5; `-k N` for "
+        "more). Start wide: add a path argument only to narrow further after "
+        "a wide search has pointed somewhere. When you are unsure of a name, "
+        "list several candidate spellings in one query rather than a regex. "
+        "When you already know the exact string — a name you have seen in "
+        "the code, an error message — `sg -e \"the_exact_string\"` returns "
+        "every literal match, grep-style. Default to ranked search; use -e "
+        "only to verify or count something you have already seen spelled "
+        "out. Example: sg \"retry_backoff backoff_delay compute_delay\" → "
+        "src/net/retry.rs:142:fn backoff_delay(attempt: u32). Ranked, not "
+        "exhaustive — if the answer isn't there, rephrase. Read and Glob are "
+        "also available."
+    ),
 }
 
 # Arms whose agent is told to type something other than `semgrep`. The binary is

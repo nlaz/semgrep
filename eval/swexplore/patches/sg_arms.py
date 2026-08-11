@@ -122,8 +122,33 @@ SG_LINE_V10 = (
 # line; `v10` is the wide-by-default rewrite (§29.3). An env switch rather than
 # an edit because both must stay runnable: §28 still owes 364 rate-limited
 # sub-sg cells that have to finish under the description they started with.
+# v11 (§30.3): v10 plus the routed exact-match escape hatch. The §30 pilot
+# measured sg-arm agents attempting shell grep 1.2×/session against the
+# harness block — the campaign's single largest cost — and the blocked argvs
+# were exactly the two intents this clause routes: verify a known name (-e's
+# job) and OR-of-candidates regexes (the ranked multi-word query's job).
+# §16.10's "never name -e" was measured on an unconditional footer; this is a
+# conditional mention inside a ranked-first identity, and exact-share is a
+# registered tripwire — collapse onto -e kills the variant.
+SG_LINE_V11 = (
+    "Additionally, `sg` is available via Bash, a ranked code search. "
+    "Give it anything — an identifier, a phrase, or a question: "
+    '`sg "query"` searches the whole repository and returns the most '
+    "relevant locations as path:line:text (top 5; `-k N` for more). "
+    "Start wide: add a path argument only to narrow further after a wide "
+    "search has pointed somewhere. When you are unsure of a name, list "
+    "several candidate spellings in one query rather than a regex. "
+    "When you already know the exact string — a name you have seen in the "
+    'code, an error message — `sg -e "the_exact_string"` returns every '
+    "literal match, grep-style. Default to ranked search; use -e only to "
+    "verify or count something you have already seen spelled out. "
+    'Example: sg "retry_backoff backoff_delay compute_delay" → '
+    "src/net/retry.rs:142:fn backoff_delay(attempt: u32). "
+    "Ranked, not exhaustive — if the answer isn't there, rephrase."
+)
+
 SG_DESC = os.environ.get("SWEXPLORE_SG_DESC", "v9")
-_SG_LINE = {"v9": SG_LINE, "v10": SG_LINE_V10}[SG_DESC]
+_SG_LINE = {"v9": SG_LINE, "v10": SG_LINE_V10, "v11": SG_LINE_V11}[SG_DESC]
 
 ARMS = {
     "cc":     ("Read,Glob,Grep",      [],             ""),
