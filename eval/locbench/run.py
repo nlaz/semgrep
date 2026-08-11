@@ -230,6 +230,27 @@ DESC_CONDITIONS = {
         "exhaustive — if the answer isn't there, rephrase. Read and Glob are "
         "also available."
     ),
+    # desc-v10 (§28.2): wide search modeled as the default, the path as a
+    # deliberate second step. Every prior variant showed `[path]` in the
+    # signature and none said anything about when to use it; agents scoped
+    # ~70% of sg calls to guessed paths, and "gold scoped away" cost 17.6% of
+    # sg's §28 losses (37.8% of rg's — the habit hurts every tool, and
+    # repo-wide ranked search is the surface where sg wins it back). Also
+    # corrects the count to the shipped k=5 (desc-v9 still said 10). The
+    # example, the mechanism sentence, and the rephrase caveat are desc-v9's
+    # own words — the §19 tripwires hold across the change.
+    "desc-v10": (
+        "The only code search tool available is `sg`, a ranked code search "
+        "you run with Bash. Give it anything — an identifier, a phrase, or a "
+        "question: `sg \"query\"` searches the whole repository and returns "
+        "the most relevant locations as path:line:text (top 5; `-k N` for "
+        "more). Start wide: add a path argument only to narrow further after "
+        "a wide search has pointed somewhere. Example: sg "
+        "\"retry_backoff backoff_delay compute_delay\" → "
+        "src/net/retry.rs:142:fn backoff_delay(attempt: u32). Ranked, not "
+        "exhaustive — if the answer isn't there, rephrase. Read and Glob are "
+        "also available."
+    ),
 }
 
 # Arms whose agent is told to type something other than `semgrep`. The binary is
