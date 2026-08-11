@@ -78,13 +78,20 @@ def gate(name, value, limit, worse="above", detail="", pct=False):
 # treatment channel in an A/B (§16.9a A1).
 VALUED_FLAGS = {"-k", "--top", "-C", "--context", "-A", "--after-context",
                 "-B", "--before-context", "-g", "--glob", "--include",
-                "--mode", "--sem-weight", "--window", "--overlap"}
+                "--mode", "--sem-weight", "--window", "--overlap",
+                # §29/§30 engine flags. Absent here, an agent typing one is
+                # misfiled as "unknown flag" — the compat-surface alarm —
+                # when the real fault may be a missing value.
+                "--min-score", "--fine-lines", "--fine-blend", "--chunking",
+                "--chunk-cap", "--passage-chars", "--passage-lines", "--path",
+                "--lines", "-M", "--max-columns"}
 KNOWN_FLAGS = VALUED_FLAGS | {
     "-e", "--exact", "-i", "--ignore-case", "-F", "--fixed-string", "--all",
     "--json", "--stats", "--stats-json", "--check-stale", "-l",
     "--files-with-matches", "-n", "--line-number", "-r", "--recursive",
     "-R", "--dereference-recursive", "-H", "--with-filename",
-    "-h", "--help", "-V", "--version", "--no-index", "--"}
+    "-h", "--help", "-V", "--version", "--no-index", "--no-fine", "--full",
+    "--headers", "--"}
 
 
 def classify_usage(argv):
@@ -175,7 +182,7 @@ def traces(row):
 def check_tool(rows, examples):
     print("\n[1/4] the tool itself")
     n_search = 0
-    usage, empty_ranked, unreadable, no_files = [], [], [], []
+    usage, empty_ranked, unreadable, no_files, floored = [], [], [], [], []
     traced = 0
     kinds = Counter()
     for r in rows:
@@ -190,6 +197,16 @@ def check_tool(rows, examples):
             res, inp = t.get("results", {}), t.get("input", {})
             if inp.get("mode") == "keyword":
                 continue  # exact mode may legitimately match nothing
+            # A floored search is a deliberate refusal, not a silent miss: the
+            # caller set --min-score, nothing cleared it, and the tool said so
+            # on stderr. Counting it here punishes the tool for doing exactly
+            # what it was configured to do — the same shape as the "bad path
+            # (tool correct)" case §28.1 had to teach the distress check about,
+            # and a gate nobody can pass is a gate that gets overridden.
+            # Reported separately by `floored` below so the rate stays visible.
+            if res.get("floored"):
+                floored.append((r["instance_id"], res.get("best_signal")))
+                continue
             if res.get("n_hits", 0) == 0:
                 empty_ranked.append((r["instance_id"], inp.get("query", "")[:40]))
                 fw, ch = res.get("files_walked"), res.get("n_chunks_considered")
@@ -216,6 +233,10 @@ def check_tool(rows, examples):
         gate("engine traces present", 0, 1, worse="below",
              detail="no SEMGREP_TRACE_FILE envelopes; the empty-result "
                     "diagnosis cannot be made and the share below is vacuous")
+    if floored:
+        print(f"  ---   {len(floored)} ranked search(es) refused by the score "
+              f"floor ({len(floored)/traced:.1%}) — a refusal is an answer, "
+              f"not a miss; reported, not gated")
     share = len(empty_ranked) / traced if traced else 0.0
     gate("ranked searches returning nothing", share, MAX_EMPTY_RANKED_SHARE,
          detail=f"{len(empty_ranked)}/{traced}", pct=True)
@@ -230,7 +251,8 @@ def check_tool(rows, examples):
             print(f"          {label}: {iid} · {what}")
     return {"n_search": n_search, "traced": traced, "usage": len(usage),
             "usage_by_cause": dict(kinds),
-            "empty_ranked": len(empty_ranked), "unreadable": len(unreadable),
+            "empty_ranked": len(empty_ranked), "floored": len(floored),
+            "unreadable": len(unreadable),
             "no_files": len(no_files)}
 
 
