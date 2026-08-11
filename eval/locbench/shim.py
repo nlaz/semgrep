@@ -85,12 +85,22 @@ def main():
         f.seek(0)
         seq = sum(1 for _ in f)
         stdout_file = stdout_dir / f"{seq:03d}.out"
-        stdout_file.write_bytes(out)
+        # LOCBENCH_STDOUT_DUMP=off keeps the *file* but drops its contents, for
+        # a large campaign that wants the log without the payload (§27's lean
+        # provenance rung: ~285 B-4 KB per search across 2,544 cells). A
+        # zero-byte file rather than no file, deliberately: `scoring.py` and
+        # `capture.py` resolve `stdout_dir / row["stdout_file"]` and test
+        # `.exists()`, so a null name would resolve to the *directory*, which
+        # exists and is not a file. Empty keeps every consumer's contract.
+        # `stdout_bytes` below still records the true size, so every gate is
+        # unaffected. Default is on — this cannot change an existing campaign.
+        dump = os.environ.get("LOCBENCH_STDOUT_DUMP", "on") != "off"
+        stdout_file.write_bytes(out if dump else b"")
         # Everything the agent was TOLD, not just how many bytes of it:
         # semgrep's footers coach mode choice on stderr, which is a
         # treatment channel in an A/B (§16.9a A1). Only stderr_bytes
         # survived before, so the channel was unauditable after the fact.
-        if err:
+        if err and dump:
             (stdout_dir / f"{seq:03d}.err").write_bytes(err)
         f.write(json.dumps({
             "seq": seq,
