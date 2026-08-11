@@ -118,6 +118,17 @@ if [ "$gate" -ne 0 ]; then
   echo "RUNG $RUN_ID GATED OFF. Do not fund the next rung."
   exit 1
 fi
+# THE ANALYSIS DOES NOT RUN AT INTERMEDIATE RUNGS. §30's registration bound
+# the endpoints to one computation on the pooled 848, and this script then
+# auto-ran them at the 120-rung — an unregistered interim look that §30.3 had
+# to disclose. A gate is harness health; an endpoint is not. Set ANALYZE=1
+# (the final rung does) to compute them.
+if [ "${ANALYZE:-0}" != "1" ]; then
+  echo "analysis skipped (interim rung — set ANALYZE=1 on the registered final rung)"
+  echo
+  echo "RUNG $RUN_ID PASSED."
+  exit 0
+fi
 # Contrasts must be named, not inferred. analyze.py's defaults are §27's
 # (cc, cc-rg, cc-sg), so a rung whose arms are anything else died here with
 # "contrast references arm(s) not in --arms" AFTER the rung had been paid for

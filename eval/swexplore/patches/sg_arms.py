@@ -178,6 +178,15 @@ ARM_TOOL = {"cc-rg": "rg", "cc-sg": "sg", "sub-rg": "rg", "sub-sg": "sg"}
 SG_SEARCH_FLAGS = os.environ.get("SWEXPLORE_SG_FLAGS", "")
 SG_INDEX_FLAGS = os.environ.get("SWEXPLORE_SG_INDEX_FLAGS", "")
 
+# §30.3's conclusion, as a switch: the substitutive design's grep block taxed
+# the sg arm 1.3 turns/session because ripgrep IS a grep and sg is not — the
+# block subsidised the arm whose treatment resembled the thing removed. With
+# this set, shell grep/egrep/fgrep pass through to the real binaries IN BOTH
+# ARMS (still shimmed, so every call is logged); the native Grep *tool* stays
+# removed, which is what keeps delivery high. Default off: §27/§28/§30 ran
+# with the block, and their cells must stay comparable to themselves.
+UNBLOCK_GREP = os.environ.get("SWEXPLORE_UNBLOCK_GREP", "") == "1"
+
 # --------------------------------------------------------------------------
 # The one clause of upstream's prompt we rewrite, and why
 # --------------------------------------------------------------------------
@@ -385,12 +394,17 @@ class ArmExplorer(ClaudeCodeExplorer):
             env["LOCBENCH_REAL_SG"] = str(SEMGREP_BIN)
             if SG_SEARCH_FLAGS:
                 env["LOCBENCH_SG_FLAGS"] = SG_SEARCH_FLAGS
+        if UNBLOCK_GREP:
+            for g in ("grep", "egrep", "fgrep"):
+                env[f"LOCBENCH_REAL_{g.upper()}"] = f"/usr/bin/{g}"
         # Steer rather than just refuse: shim.py writes these on both stdout
         # and stderr, because an agent piping into `head` sees silence
         # otherwise and reads it as "no matches" (run.py:514-531).
         steer = (f"use the {tool} command instead" if tool
                  else "use the Grep and Glob tools instead")
-        for t in ("grep", "egrep", "fgrep", "rg", "sg"):
+        blocked_names = ("rg", "sg") if UNBLOCK_GREP else \
+            ("grep", "egrep", "fgrep", "rg", "sg")
+        for t in blocked_names:
             env[f"LOCBENCH_BLOCKMSG_{t.upper()}"] = (
                 f"{t}: unavailable in this environment — {steer}")
         env["LOCBENCH_BLOCKMSG_GIT"] = (
