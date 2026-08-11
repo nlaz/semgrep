@@ -117,8 +117,14 @@ def classify_usage(argv):
         return "missing flag value (tool correct)"
     # A query that begins with a dash reads as flags. The caller's mistake, but
     # the message is unhelpful without the `--` hint, so it is tracked apart.
-    if toks[0].startswith("-") and " " in toks[0]:
-        return "query starts with a dash (needs --)"
+    #
+    # Checked over every token, not just the first: `sg -e "->numslots = 0" f.c`
+    # puts the dash-leading QUERY second, behind a perfectly good `-e`, and the
+    # first-token-only rule filed it as "unknown flag" — the compat-surface
+    # alarm — for what is a caller mistake the tool is right to reject (§32).
+    for t in toks:
+        if t.startswith("-") and " " in t:
+            return "query starts with a dash (needs --)"
     # Any dash token the CLI does not define. Combined shorts (-rn) are
     # expanded so a known pair is not misread as unknown.
     for t in toks:

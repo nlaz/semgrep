@@ -118,9 +118,21 @@ def check_distress_swex(rows, examples):
     orig = triage.searches
 
     def without_correct_rejections(row):
-        return [e for e in orig(row)
-                if not (e.get("exit") == 2 and "(tool correct)" in
-                        triage.classify_usage(e.get("argv") or []))]
+        def is_correct_rejection(e):
+            argv = e.get("argv") or []
+            if e.get("exit") == 2 and "(tool correct)" in triage.classify_usage(argv):
+                return True
+            # A ranked search exiting 1 is the score floor refusing (§29.2) —
+            # ranked search cannot otherwise return zero, top-k always has k.
+            # A refusal is an answer, and counting it as an empty search fails
+            # the run for behaving as configured. This bites hardest in the
+            # grep-unblocked regime (§32), where an agent may make ONE sg call:
+            # if the floor declines it, the instance reads "every search empty".
+            if e.get("exit") == 1 and "-e" not in argv and "--exact" not in argv:
+                return True
+            return False
+
+        return [e for e in orig(row) if not is_correct_rejection(e)]
 
     triage.searches = without_correct_rejections
     try:
