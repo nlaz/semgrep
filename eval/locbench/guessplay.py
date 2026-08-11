@@ -78,6 +78,13 @@ CONFIGS = {
     "champion":   {"index": ["--embed-preproc", "split", "--sif"],
                    "search": ["--embed-preproc", "split"],
                    "partial": "sif is index-only; file scopes get split alone"},
+    # §29.3: function-boundary chunking. Both halves, same reasoning as the
+    # rendering configs — a repo-local .semgrep serves whatever params built
+    # it, so a search-only flag would leave every directory scope untreated
+    # and report a diluted null; the search half is what treats file scopes,
+    # which never resolve an index.
+    "funcchunk":  {"index": ["--chunking", "function"],
+                   "search": ["--chunking", "function"]},
 }
 MODES = ("bm25", "semantic", "hybrid")
 

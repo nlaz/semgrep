@@ -33,6 +33,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -87,10 +88,11 @@ SG_LINE = (
 )
 
 # The desc-v10 framing (wide search as the default, the path as a deliberate
-# second step — §28.2's "gold scoped away" bucket is the target). NOT wired
-# into any arm: §28's registered arms ran with SG_LINE above, and the 364
-# rate-limited sub-sg cells must complete under the registered treatment or
-# the arm becomes a mixture. A future campaign registers arms on this line.
+# second step — §28.2's "gold scoped away" bucket is the target). Selected by
+# SWEXPLORE_SG_DESC, defaulting to the §27/§28 registered line: those arms ran
+# with SG_LINE and their 364 rate-limited sub-sg cells must complete under the
+# registered treatment or the arm becomes a mixture of two descriptions. §30
+# sets SWEXPLORE_SG_DESC=v10 and registers the arms on this line instead.
 SG_LINE_V10 = (
     "Additionally, `sg` is available via Bash, a ranked code search. "
     "Give it anything — an identifier, a phrase, or a question: "
@@ -115,14 +117,41 @@ SG_LINE_V10 = (
 # `--tools` takes away the native tool, and the PATH shims block shell
 # `grep`/`egrep`/`fgrep`. `--allowedTools` does NOT enforce anything under
 # `--permission-mode dontAsk` (see _make_shims).
+#
+# Which sg description the sg arms carry. Default is the §27/§28 registered
+# line; `v10` is the wide-by-default rewrite (§29.3). An env switch rather than
+# an edit because both must stay runnable: §28 still owes 364 rate-limited
+# sub-sg cells that have to finish under the description they started with.
+SG_DESC = os.environ.get("SWEXPLORE_SG_DESC", "v9")
+_SG_LINE = {"v9": SG_LINE, "v10": SG_LINE_V10}[SG_DESC]
+
 ARMS = {
     "cc":     ("Read,Glob,Grep",      [],             ""),
     "cc-rg":  ("Read,Glob,Grep,Bash", ["Bash(rg *)"], RG_LINE),
-    "cc-sg":  ("Read,Glob,Grep,Bash", ["Bash(sg *)"], SG_LINE),
+    "cc-sg":  ("Read,Glob,Grep,Bash", ["Bash(sg *)"], _SG_LINE),
     "sub-rg": ("Read,Glob,Bash",      ["Bash(rg *)"], RG_LINE),
-    "sub-sg": ("Read,Glob,Bash",      ["Bash(sg *)"], SG_LINE),
+    "sub-sg": ("Read,Glob,Bash",      ["Bash(sg *)"], _SG_LINE),
 }
 ARM_TOOL = {"cc-rg": "rg", "cc-sg": "sg", "sub-rg": "rg", "sub-sg": "sg"}
+
+# --------------------------------------------------------------------------
+# Engine flags for the sg arm (§30)
+# --------------------------------------------------------------------------
+# Injected by shim.py into the REAL invocation and never shown to the agent,
+# so its commands and the logged argv stay the plain `sg "query"` an agent
+# would type. Empty by default: §27/§28 ran the shipped defaults, and their
+# unfinished cells must not silently acquire a new engine.
+#
+# The chunking half must ALSO reach the index build, and that is the trap this
+# pair of constants exists to avoid. A repo-local `.semgrep/` is exempt from
+# cache-tag matching by design (cache::discover — "the user built it
+# deliberately"), so an index built with line windows will happily answer a
+# function-chunked search: set only the search half and every DIRECTORY scope
+# runs untreated while file scopes (which resolve no index) run treated. That
+# is a half-dose reported as a diluted null — the same failure guessplay.py's
+# CONFIGS comment documents for the rendering levers.
+SG_SEARCH_FLAGS = os.environ.get("SWEXPLORE_SG_FLAGS", "")
+SG_INDEX_FLAGS = os.environ.get("SWEXPLORE_SG_INDEX_FLAGS", "")
 
 # --------------------------------------------------------------------------
 # The one clause of upstream's prompt we rewrite, and why
@@ -191,6 +220,25 @@ RG_BIN = os.environ.get("RG_BIN", "/opt/homebrew/bin/rg")
 #     replays to the agent, so they are agent-visible by construction and are
 #     never used here at any level.
 PROV = os.environ.get("SWEXPLORE_PROV", "full")
+
+
+def _index_matches(meta_path: Path, flags: list[str]) -> bool:
+    """Does this built index actually carry the chunking the arm asked for?
+
+    Only `--chunking` is checked, because it is the one index-side flag §30
+    sets and the only one whose absence is invisible: a repo-local `.semgrep`
+    is exempt from cache-tag matching, so a window-chunked index answers a
+    function-chunked search with no error anywhere.
+    """
+    want = "window"
+    if "--chunking" in flags:
+        want = flags[flags.index("--chunking") + 1]
+    try:
+        meta = json.loads(meta_path.read_text())
+    except Exception:  # noqa: BLE001
+        return False
+    got = (meta.get("params") or {}).get("function")
+    return (got is not None) if want == "function" else (got is None)
 
 
 def _sha(text: str) -> str:
@@ -310,6 +358,8 @@ class ArmExplorer(ClaudeCodeExplorer):
             env["LOCBENCH_REAL_RG"] = RG_BIN
         elif tool == "sg":
             env["LOCBENCH_REAL_SG"] = str(SEMGREP_BIN)
+            if SG_SEARCH_FLAGS:
+                env["LOCBENCH_SG_FLAGS"] = SG_SEARCH_FLAGS
         # Steer rather than just refuse: shim.py writes these on both stdout
         # and stderr, because an agent piping into `head` sees silence
         # otherwise and reads it as "no matches" (run.py:514-531).
@@ -328,14 +378,25 @@ class ArmExplorer(ClaudeCodeExplorer):
         if ARM_TOOL.get(self.arm) != "sg":
             return {"built": False, "reason": "arm has no sg"}
         idx = Path(self.repo_root) / ".semgrep" / "meta.json"
-        if idx.exists() and idx.stat().st_mtime >= SEMGREP_BIN.stat().st_mtime:
+        flags = shlex.split(SG_INDEX_FLAGS)
+        if idx.exists() and idx.stat().st_mtime >= SEMGREP_BIN.stat().st_mtime \
+                and _index_matches(idx, flags):
             return {"built": False, "reason": "reused"}
         t0 = time.time()
-        p = subprocess.run([str(SEMGREP_BIN), "index", str(self.repo_root)],
+        p = subprocess.run([str(SEMGREP_BIN), "index", str(self.repo_root), *flags],
                            capture_output=True, timeout=3600)
-        return {"built": p.returncode == 0, "index_s": round(time.time() - t0, 2),
-                "returncode": p.returncode,
-                "stderr": p.stderr.decode(errors="ignore")[-400:] if p.returncode else ""}
+        out = {"built": p.returncode == 0, "index_s": round(time.time() - t0, 2),
+               "returncode": p.returncode, "index_flags": SG_INDEX_FLAGS,
+               "stderr": p.stderr.decode(errors="ignore")[-400:] if p.returncode else ""}
+        # Readback, for the same reason guessplay.py asserts its own: a build
+        # that quietly produced the previous geometry is indistinguishable from
+        # a null, and a repo-local index is exempt from cache-tag matching, so
+        # nothing downstream would catch it.
+        if p.returncode == 0 and not _index_matches(idx, flags):
+            raise RuntimeError(
+                f"{self.arm}: index at {idx} does not carry {SG_INDEX_FLAGS!r} "
+                f"after a successful build — the arm would run untreated")
+        return out
 
     # ------------------------------------------------------------- explore
     def explore(self, *, instance_id: str, query: str, top_k: int = 5
