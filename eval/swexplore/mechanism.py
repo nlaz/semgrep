@@ -28,8 +28,11 @@ Run for BOTH directions, always: a bucket is only a finding about a tool if
 the other tool does not lose the same way (§28.2 — "scoped away" is the
 largest rg bucket, so it is an agent behavior, not an sg defect).
 
-Surface-text caveat: "appeared in output" is a path/basename substring match
-on the captured stdout, which can overcount for common basenames.
+Surface-text caveat: "appeared in output" is a full-path substring match on
+the captured stdout. It was a path-OR-basename match until §32.4 measured
+the damage — `tests.py` matches any repo's test file — so the E/C splits in
+§28.2, computed under the old rule, read as upper bounds on "the tool showed
+it" and lower bounds on "the agent guessed".
 """
 
 import argparse
@@ -120,14 +123,17 @@ def account(run_id, ids, loser, winner, larm, ltool, delta, gold):
                     local["A line precision <=32 (chunk edge)" if dist <= 32
                           else "B line precision >32 (wrong area)"] += 1
                 else:
-                    base = p["path"].rsplit("/", 1)[-1]
-                    shown = p["path"] in alltxt or base in alltxt
+                    # Full path only. A basename fallback matched
+                    # `tests.py` and `loader.py`-inside-`dataloader.py`
+                    # against files the tool never displayed, inflating C at
+                    # D's expense — measured in §32.4, where fixing the same
+                    # bug in misswhy.py moved ~150 regions between buckets.
+                    shown = p["path"] in alltxt
                     local["C noise (tool showed it)" if shown
                           else "D noise (agent's own)"] += 1
             win_files = {p["path"] for p in winner[i].get("regions") or []} & g["files"]
             for f in win_files - sub_paths:
-                base = f.rsplit("/", 1)[-1]
-                if f in alltxt or base in alltxt:
+                if f in alltxt:
                     local["E gold surfaced, not submitted"] += 1
                 elif not any_wide:
                     local["F gold scoped away (file-scoped only)"] += 1
