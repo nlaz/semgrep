@@ -1,0 +1,195 @@
+diff --git a/eval_runner.py b/eval_runner.py
+index c65cb4d..5e804ad 100644
+--- a/eval_runner.py
++++ b/eval_runner.py
+@@ -9,6 +9,7 @@ Usage:
+ from __future__ import annotations
+ 
+ import json
++import os
+ import sys
+ import time
+ from concurrent.futures import ThreadPoolExecutor, as_completed
+@@ -48,6 +49,24 @@ METRICS = [
+ LOCAL_EXPLORERS = {"bm25", "rag", "tfidf", "potion", "simple_rule", "oracle", "random", "embed", "swerank"}
+ AGENTIC_EXPLORERS = {"claude_code", "cursor"}
+ ACADEMIC_EXPLORERS = {"autocr", "cosil", "locagent", "orcaloca", "mini_swe_agent", "awe_agent"}
++
++# ── semgrep §27 ─────────────────────────────────────────────────────────
++# Three additive arms and one static retriever. Registering them here rather
++# than forking the runner means --resume, --workers and --top-k all apply
++# unchanged. SG_DATA is where fetch.sh put bench.jsonl and sidecar.jsonl.
++# cc*: additive (native Grep present). sub-*: substitutive (Grep removed).
++SG_ARMS = {"cc", "cc-rg", "cc-sg", "sub-rg", "sub-sg", "sub-sgb"}
++SG_STATIC = {"sg_static"}
++SG_DATA = Path(os.environ.get("SWEXPLORE_DATA", Path(__file__).resolve().parent.parent))
++SG_ROLLING = os.environ.get("SWEXPLORE_ROLLING", "1") == "1"
++# One run id across all three arm passes, so runs/<run_id>/<iid>/<arm>/ is the
++# layout displaycmp.py globs. Set by campaign.sh; the timestamp default is for
++# ad-hoc smoke runs only.
++SG_RUN_DIR = SG_DATA / "runs" / os.environ.get(
++    "SWEXPLORE_RUN_ID", time.strftime("%Y%m%d-%H%M%S"))
++
++AGENTIC_EXPLORERS = AGENTIC_EXPLORERS | SG_ARMS
++LOCAL_EXPLORERS = LOCAL_EXPLORERS | SG_STATIC
+ ALL_EXPLORERS = LOCAL_EXPLORERS | AGENTIC_EXPLORERS | ACADEMIC_EXPLORERS
+ 
+ 
+@@ -83,6 +102,15 @@ def _resolve_repo_dir(
+     repos_root: Path | None,
+     instance_id: str,
+ ) -> Path | None:
++    # ── semgrep §27: rolling checkouts ──────────────────────────────────
++    # Upstream assumes --repos is prefetched. 848 checkouts measure 26.6 GB
++    # against 21 GiB free here, so they are fetched on demand and evicted
++    # under a byte cap. See _sg_repos for why an LRU and not a refcount.
++    if SG_ROLLING and repos_root is not None and instance_id:
++        import _sg_repos
++        got = _sg_repos.ensure(instance_id, repos_root, SG_DATA)
++        if got is not None:
++            return got
+     if repo_dir_value:
+         p = Path(repo_dir_value)
+         if not p.is_absolute() and repos_root is not None:
+@@ -104,6 +132,17 @@ def _resolve_repo_dir(
+     return None
+ 
+ 
++def _sg_telemetry(instance_id: str, arm: str) -> dict | None:
++    """semgrep §27: per-cell cost/usage written by explorers/sg_arms.py."""
++    p = SG_RUN_DIR / instance_id / arm / "telemetry.json"
++    if not p.is_file():
++        return None
++    try:
++        return json.loads(p.read_text())
++    except (OSError, json.JSONDecodeError):
++        return None
++
++
+ def _iter_gt_paths(gt: dict) -> Iterable[str]:
+     for r in gt.get("read_core_regions") or []:
+         path = r.get("path")
+@@ -119,6 +158,19 @@ def _iter_gt_paths(gt: dict) -> Iterable[str]:
+ def _build_file_line_counts(
+     records: list[dict], repos_root: Path | None,
+ ) -> dict[str, dict[str, int]]:
++    # ── semgrep §27 ─────────────────────────────────────────────────────
++    # Walking every record needs every repo resident at once, which rolling
++    # eviction makes impossible. Under rolling mode, load whatever previous
++    # passes persisted; _get_repo_dir tops this dict up in place as each
++    # checkout goes live, and _score_instance reads it per instance, so the
++    # counts are present before the instance that needs them is scored.
++    #
++    # This is a correctness fix, not a disk one: eval.py:_resolve_interval
++    # returns None — dropping the region from every metric, silently — for
++    # any gold region with end == -1 or start < 0 when the count is missing.
++    if SG_ROLLING:
++        import _sg_repos
++        return _sg_repos.load_line_counts(SG_DATA)
+     counts: dict[str, dict[str, int]] = {}
+     for rec in records:
+         iid = rec.get("instance_id", "")
+@@ -339,6 +391,16 @@ def run(
+         iid = rec.get("instance_id", "")
+         rd = _resolve_repo_dir(rec.get("repo_dir"), repos_root, iid)
+         if rd and rd.is_dir():
++            # semgrep §27: the only moment this checkout is guaranteed live,
++            # so take the gold-file line counts now. Mutates file_line_counts
++            # in place because _score_instance reads that same dict later in
++            # this pass, and persists so later passes skip the work.
++            if SG_ROLLING and iid not in file_line_counts:
++                import _sg_repos
++                per = _sg_repos.record_line_counts(
++                    iid, rec.get("ground_truth") or {}, rd, SG_DATA)
++                if per:
++                    file_line_counts[iid] = per
+             return rd
+         return None
+ 
+@@ -464,11 +526,20 @@ def run(
+         rd = _get_repo_dir(rec)
+         if rd is None:
+             return None if skip_missing_repo else []
+-        explorer = make_explorer(rd)
+-        results = explorer.explore(
+-            instance_id=rec["instance_id"], query=_get_issue(rec), top_k=max_top_k,
+-        )
+-        return _results_to_regions(results)
++        # semgrep §27: hold the checkout for the agent's whole lifetime. Without
++        # this the LRU in another worker thread deletes the cwd of a live agent
++        # — 432 of 848 cc-sg rows died at 2.7s with 1 turn before it was added.
++        iid = rec["instance_id"]
++        import _sg_repos
++        _sg_repos.acquire(iid)
++        try:
++            explorer = make_explorer(rd)
++            results = explorer.explore(
++                instance_id=iid, query=_get_issue(rec), top_k=max_top_k,
++            )
++            return _results_to_regions(results)
++        finally:
++            _sg_repos.release(iid)
+ 
+     # Resolved here so both Claude Code (Anthropic-protocol via LiteLLM) and
+     # academic explorers (OpenAI-protocol via LiteLLM) share the same key.
+@@ -484,6 +555,29 @@ def run(
+             ),
+         )
+ 
++    # ── semgrep §27 arms ────────────────────────────────────────────────
++    # cc / cc-rg / cc-sg differ only in --tools, --allowedTools and the
++    # appended system prompt; EXPLORE_PROMPT and parse_relevant_files are
++    # inherited from ClaudeCodeExplorer so the task contract is theirs.
++    def _sg_arm_method(rec: dict, arm: str) -> list[tuple[str, int, int]] | None:
++        from explorers.sg_arms import ArmExplorer
++        return _agentic_method(
++            rec,
++            lambda rd: ArmExplorer(
++                repo_root=rd, model=claude_model, timeout=claude_timeout,
++                api_base=academic_api_base, api_key=_academic_key,
++                arm=arm, run_dir=SG_RUN_DIR,
++            ),
++        )
++
++    def sg_static_method(rec: dict) -> list[tuple[str, int, int]] | None:
++        from explorers.sg_static import SgStaticExplorer
++        rd = _get_repo_dir(rec)
++        if rd is None:
++            return None if skip_missing_repo else []
++        return _results_to_regions(SgStaticExplorer(repo_root=rd).explore(
++            instance_id=rec["instance_id"], query=_get_issue(rec), top_k=max_top_k))
++
+     def cursor_method(rec: dict) -> list[tuple[str, int, int]] | None:
+         from explorers.cursor_agent import CursorAgentExplorer
+         return _agentic_method(
+@@ -583,6 +677,14 @@ def run(
+         "swerank": swerank_method,
+         "claude_code": claude_code_method,
+         "cursor": cursor_method,
++        # semgrep §27
++        "cc": lambda rec: _sg_arm_method(rec, "cc"),
++        "cc-rg": lambda rec: _sg_arm_method(rec, "cc-rg"),
++        "cc-sg": lambda rec: _sg_arm_method(rec, "cc-sg"),
++        # §28 — Grep removed from --tools; the Bash tool is the only search
++        "sub-rg": lambda rec: _sg_arm_method(rec, "sub-rg"),
++        "sub-sg": lambda rec: _sg_arm_method(rec, "sub-sg"),
++        "sg_static": sg_static_method,
+         "autocr": autocr_method,
+         "cosil": cosil_method,
+         "locagent": locagent_method,
+@@ -690,6 +792,15 @@ def run(
+                     "metrics": scores_per_k[k],
+                     "num_regions": min(len(preds), k),
+                 }
++                # ── semgrep §27: cost is a co-primary endpoint ───────────
++                # The explorer wrote total_cost_usd / num_turns / usage from
++                # the stream-json result event; join it here so one row
++                # carries both what was found and what it cost. Upstream
++                # cannot do this at all: --output-format json returns a
++                # single blob with no usage and no per-turn accounting.
++                tel = _sg_telemetry(iid, name)
++                if tel:
++                    row["agent"] = tel
+                 for m in METRICS:
+                     per_k_totals[k][m] += scores_per_k[k][m]
+                 per_k_evaluated[k] += 1
