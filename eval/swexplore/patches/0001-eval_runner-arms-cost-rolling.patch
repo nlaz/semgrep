@@ -162,7 +162,7 @@ index c65cb4d..5e804ad 100644
      def cursor_method(rec: dict) -> list[tuple[str, int, int]] | None:
          from explorers.cursor_agent import CursorAgentExplorer
          return _agentic_method(
-@@ -583,6 +677,14 @@ def run(
+@@ -583,6 +677,15 @@ def run(
          "swerank": swerank_method,
          "claude_code": claude_code_method,
          "cursor": cursor_method,
@@ -173,6 +173,7 @@ index c65cb4d..5e804ad 100644
 +        # §28 — Grep removed from --tools; the Bash tool is the only search
 +        "sub-rg": lambda rec: _sg_arm_method(rec, "sub-rg"),
 +        "sub-sg": lambda rec: _sg_arm_method(rec, "sub-sg"),
++        "sub-sgb": lambda rec: _sg_arm_method(rec, "sub-sgb"),
 +        "sg_static": sg_static_method,
          "autocr": autocr_method,
          "cosil": cosil_method,
