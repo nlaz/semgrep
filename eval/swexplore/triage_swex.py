@@ -52,7 +52,7 @@ triage.DATA = DATA
 # Which binary each arm was told to type. `cc` has no Bash tool at all.
 # cc*: additive (native Grep present). sub-*: substitutive (Grep removed).
 ALL_ARM_TOOL = {"cc": None, "cc-rg": "rg", "cc-sg": "sg",
-                "sub-rg": "rg", "sub-sg": "sg"}
+                "sub-rg": "rg", "sub-sg": "sg", "sub-sgb": "sg"}
 # Set per invocation from --arms. A rung must gate exactly the arms it ran:
 # the harness-health gates compare against the REGISTERED set, so leaving this
 # as every known arm would fail "registered arms absent" on any partial run,
