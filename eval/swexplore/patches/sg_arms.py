@@ -156,8 +156,12 @@ ARMS = {
     "cc-sg":  ("Read,Glob,Grep,Bash", ["Bash(sg *)"], _SG_LINE),
     "sub-rg": ("Read,Glob,Bash",      ["Bash(rg *)"], RG_LINE),
     "sub-sg": ("Read,Glob,Bash",      ["Bash(sg *)"], _SG_LINE),
+    # §33: identical surface to sub-sg — same description, same prompt, same
+    # index — plus engine flags the agent never sees (bridge expansion). The
+    # arm IS the flag delta; everything else must match sub-sg exactly.
+    "sub-sgb": ("Read,Glob,Bash",     ["Bash(sg *)"], _SG_LINE),
 }
-ARM_TOOL = {"cc-rg": "rg", "cc-sg": "sg", "sub-rg": "rg", "sub-sg": "sg"}
+ARM_TOOL = {"cc-rg": "rg", "cc-sg": "sg", "sub-rg": "rg", "sub-sg": "sg", "sub-sgb": "sg"}
 
 # --------------------------------------------------------------------------
 # Engine flags for the sg arm (§30)
@@ -217,6 +221,7 @@ ARM_CLAUSE = {
     # cc-sg and sub-sg is the presence of Grep — which is the treatment.
     "sub-rg": "Use Glob, Read, and the `rg` command (via Bash) to explore the codebase.",
     "sub-sg": "Use Glob, Read, and the `sg` command (via Bash) to explore the codebase.",
+    "sub-sgb": "Use Glob, Read, and the `sg` command (via Bash) to explore the codebase.",
 }
 
 
@@ -392,8 +397,12 @@ class ArmExplorer(ClaudeCodeExplorer):
             env["LOCBENCH_REAL_RG"] = RG_BIN
         elif tool == "sg":
             env["LOCBENCH_REAL_SG"] = str(SEMGREP_BIN)
-            if SG_SEARCH_FLAGS:
-                env["LOCBENCH_SG_FLAGS"] = SG_SEARCH_FLAGS
+            flags = SG_SEARCH_FLAGS
+            if self.arm == "sub-sgb":
+                extra = os.environ.get("SWEXPLORE_SGB_EXTRA", "--bridge-expand 8")
+                flags = f"{flags} {extra}".strip()
+            if flags:
+                env["LOCBENCH_SG_FLAGS"] = flags
         if UNBLOCK_GREP:
             for g in ("grep", "egrep", "fgrep"):
                 env[f"LOCBENCH_REAL_{g.upper()}"] = f"/usr/bin/{g}"
