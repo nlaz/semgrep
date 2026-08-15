@@ -40,6 +40,7 @@ ALL_LABEL = {
     "cc-sg": "cc-sg — Grep + semgrep",
     "sub-rg": "sub-rg — ripgrep only, no Grep",
     "sub-sg": "sub-sg — semgrep only, no Grep",
+    "sub-sgb": "sub-sgb — semgrep + bridge expansion (§33)",
 }
 ALL_TOOLS = {
     "cc": "Read, Glob, Grep",
@@ -47,9 +48,10 @@ ALL_TOOLS = {
     "cc-sg": "Read, Glob, Grep, Bash(sg)",
     "sub-rg": "Read, Glob, Bash(rg)",
     "sub-sg": "Read, Glob, Bash(sg)",
+    "sub-sgb": "Read, Glob, Bash(sg --bridge-expand 8)",
 }
 ALL_ARM_TOOL = {"cc": None, "cc-rg": "rg", "cc-sg": "sg",
-                "sub-rg": "rg", "sub-sg": "sg"}
+                "sub-rg": "rg", "sub-sg": "sg", "sub-sgb": "sg"}
 ARM_LABEL = dict(ALL_LABEL)
 ARM_TOOL = {"cc-rg": "rg", "cc-sg": "sg"}
 CONTRASTS = (("cc-sg", "cc", "semgrep added vs Grep alone"),
@@ -586,7 +588,7 @@ def render(b):
 
     armrows = "".join(
         f'<tr><td class="m">{esc(a)}</td><td class="m">{esc(ALL_TOOLS.get(a, "?"))}</td>'
-        f'<td style="text-align:left">{esc(ALL_LABEL.get(a, a).split("—")[-1].strip())}</td></tr>'
+        f'<td style="text-align:left">{esc(ARM_LABEL.get(a, ALL_LABEL.get(a, a)).split("—")[-1].strip())}</td></tr>'
         for a in arms)
 
     gloss = "".join(
@@ -668,10 +670,7 @@ on how well those five overlap the key.</p>
 difference is which search tools exist:</p>
 <div class="scroll"><table><tr><th>arm</th><th>tools available</th><th>meaning</th></tr>
 {armrows}</table></div>
-<div class="note"><b>Why more than two arms.</b> Comparing one search tool to another looks
-simple, but the tools differ in more than identity — one is built into the agent, the others
-are run through a shell. An extra arm that changes only that lets a difference be attributed
-to the right cause instead of the convenient one.</div>
+<div class="note"><b>Why an arm that differs by one flag.</b> Both arms are the same agent, same prompt, same tool description, same index — the only difference is whether the search tool expands the query with vocabulary mined from the repository's own bridge files. A contrast that narrow is what lets a difference be attributed to the mechanism rather than to the tool being present at all.</div>
 
 <h2>How to read the numbers</h2>
 <div class="scroll"><table><tr><th>measure</th><th>what it asks</th></tr>{gloss}</table></div>
@@ -751,10 +750,16 @@ if __name__ == "__main__":
     if a.grep_unblocked:
         # §32 unblocked shell grep in BOTH arms, so the sub-* labels' "no Grep"
         # is false. A viewer that mislabels the treatment is worse than none.
+        # ARM_LABEL feeds the meaning column (viewer bug found 2026-08-15: it
+        # read the un-relabelled ALL_LABEL, so a page built with grep unblocked
+        # still told the reader "no Grep" beside a tools column listing grep).
         ARM_LABEL["sub-rg"] = "sub-rg — ripgrep + shell grep (two lexical tools)"
         ARM_LABEL["sub-sg"] = "sub-sg — semgrep + shell grep (semantic + lexical)"
+        ARM_LABEL["sub-sgb"] = ("sub-sgb — the same, plus bridge expansion "
+                                "(§33's one-flag treatment)")
         ALL_TOOLS["sub-rg"] = "Read, Glob, Bash(rg, grep)"
         ALL_TOOLS["sub-sg"] = "Read, Glob, Bash(sg, grep)"
+        ALL_TOOLS["sub-sgb"] = "Read, Glob, Bash(sg --bridge-expand 8, grep)"
     if a.contrasts:
         CONTRASTS = tuple((p.split(":")[0].strip(), p.split(":")[1].strip(),
                            f"{p.split(':')[0].strip()} vs {p.split(':')[1].strip()}")
