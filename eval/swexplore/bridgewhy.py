@@ -88,6 +88,13 @@ def main():
     ap.add_argument("--treatment", default="sub-sgb")
     ap.add_argument("--control", default="sub-sg")
     ap.add_argument("--metric", default="hit_region_rate")
+    ap.add_argument("--diagnostics-only", action="store_true",
+                    help="exposure/fire-rate only, NO endpoint tables — the "
+                         "flag that would have prevented §33.1f's accidental "
+                         "interim look")
+    ap.add_argument("--target-n", type=int, default=848,
+                    help="registered paired n; a shorter run is flagged as "
+                         "an interim look rather than reported bare")
     ap.add_argument("--also", default="hit_file_rate",
                     help="second metric to stratify, §33.1c predicts the "
                          "mechanism shows here rather than on the primary")
@@ -110,6 +117,14 @@ def main():
     print(f"  sessions where bridge fired   : {n_any} ({n_any / len(ids):.0%})")
     print(f"  searches expanded             : {all_fired}"
           + (f", mean {all_terms / all_fired:.1f} terms" if all_fired else ""))
+
+    if len(ids) < args.target_n:
+        print(f"\n*** INTERIM: {len(ids)} of {args.target_n} registered pairs. "
+              f"Any endpoint below is an unregistered look and must be\n"
+              f"    disclosed if acted on (RESEARCH.md §33.1b, §33.1f).")
+    if args.diagnostics_only:
+        print("\n(--diagnostics-only: endpoints withheld)")
+        return
 
     for metric in (args.metric, args.also):
         print(f"\n== {metric} (paired, treatment − control)")
