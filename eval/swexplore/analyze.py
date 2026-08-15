@@ -44,7 +44,7 @@ from ab_analyze import boot_ci, mcnemar  # noqa: E402
 # separator would split `cc-sg` in half.
 ARMS = ("cc", "cc-rg", "cc-sg")
 ALL_ARM_TOOL = {"cc": None, "cc-rg": "rg", "cc-sg": "sg",
-                "sub-rg": "rg", "sub-sg": "sg"}
+                "sub-rg": "rg", "sub-sg": "sg", "sub-sgb": "sg"}
 ARM_TOOL = {"cc-rg": "rg", "cc-sg": "sg"}
 CONTRASTS = (("cc-sg", "cc", "PRIMARY  sg − cc"),
              ("cc-rg", "cc", "confound rg − cc"),
