@@ -138,6 +138,12 @@ _HIT_LINE = re.compile(r"(?m)^([^\s:][^:\n]*):\d+:")
 # already named it: `264:\ttext`. Without this the scorer goes blind on
 # exactly the scope agents use most — see the docstring below.
 _HIT_LINE_NOPATH = re.compile(r"(?m)^\d+:\t")
+# The unit view's header (RESEARCH.md §34): ranked hits print the path once
+# as `path:START-END` and body rows as `N:\ttext`. A header is path-bearing
+# exactly like _HIT_LINE; body rows happen to match _HIT_LINE_NOPATH, which
+# stays correct because that branch only fires when a scope is itself a gold
+# file — the one case where a path-less row's file is known by construction.
+_HIT_HEADER = re.compile(r"(?m)^([^\s:][^:\n]*):(\d+)-(\d+)$")
 
 
 def _scopes(argv):
@@ -186,6 +192,7 @@ def first_gold_hit_seq(shim_log_path, stdout_dir, gold_files):
     matcher above can see that, so the scope itself is checked against gold —
     a hit in a path-less listing is in the named file by construction.
     """
+    import itertools
     import pathlib
 
     log = pathlib.Path(shim_log_path)
@@ -219,7 +226,7 @@ def first_gold_hit_seq(shim_log_path, stdout_dir, gold_files):
         # is in *that* file by construction — there is nothing else it could be.
         if _HIT_LINE_NOPATH.search(text) and any(s in gold for s in scopes):
             return pos
-        for m in _HIT_LINE.finditer(text):
+        for m in itertools.chain(_HIT_LINE.finditer(text), _HIT_HEADER.finditer(text)):
             printed = _rel(m.group(1), cwd)
             if printed in gold:
                 return pos

@@ -78,7 +78,10 @@ def load_gold():
     return gold
 
 
-PATHLINE = re.compile(r"^([^\s:][^:]*):(\d+):", re.M)
+# Matches both hit-line forms: grep-style `path:41:text` (exact mode and
+# old captures) and the §34 unit-view header `path:41-58` (ranked mode
+# since the unit view shipped). group(1)/group(2) mean the same in both.
+PATHLINE = re.compile(r"^([^\s:][^:]*):(\d+)(?::|-\d+$)", re.M)
 
 
 def tool_calls(cell, tool):

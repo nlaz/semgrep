@@ -293,7 +293,8 @@ DESC_CONDITIONS = {
 # them types `sg` and ALLOWED is derived from ARM_TOOL — an arm missing from it
 # would have every search denied.
 DISPLAY_CONDITIONS = ("disp-line", "disp-full", "disp-head",
-                      "pl-1", "pl-18", "pl-full", "pl-18k5")
+                      "pl-1", "pl-18", "pl-full", "pl-18k5",
+                      "disp-unit", "disp-nounit")
 
 ARM_TOOL = {"desc-v9": "sg", **{n: "sg" for n in DISPLAY_CONDITIONS}}
 
@@ -331,6 +332,12 @@ SG_ENGINE_CONDITIONS = {
     "pl-18": "--passage-lines 18",
     "pl-full": "--full",
     "pl-18k5": "--passage-lines 18 -k 5",
+    # §34's arms: the unit view shipped as the default, so the treatment arm
+    # injects nothing and the control opts out. Named explicitly anyway — an
+    # arm that relied on the default would silently become the other arm the
+    # day the default moved (the pl-* lesson, restated).
+    "disp-unit": "",
+    "disp-nounit": "--no-unit",
     "sg-mx48": "--maxsim --maxsim-pool 48",
     "sg-mx96": "--maxsim",
     "sg-sif": "--maxsim",

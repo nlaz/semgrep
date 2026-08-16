@@ -45,7 +45,10 @@ ap.add_argument("--out", required=True)
 ap.add_argument("--run-id", default="s32")
 ap.add_argument("--arm", default="sub-sg")
 args = ap.parse_args()
-PATHLINE = re.compile(r"^([^\s:][^:]*):(\d+):", re.M)
+# Matches both hit-line forms: grep-style `path:41:text` (exact mode and
+# old captures) and the §34 unit-view header `path:41-58` (ranked mode
+# since the unit view shipped). group(1)/group(2) mean the same in both.
+PATHLINE = re.compile(r"^([^\s:][^:]*):(\d+)(?::|-\d+$)", re.M)
 IDENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]{2,}")
 
 CONFIGS = {
