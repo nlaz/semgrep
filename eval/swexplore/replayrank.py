@@ -32,7 +32,11 @@ import tempfile
 
 HERE = pathlib.Path(__file__).parent
 DATA = HERE.parent / "data" / "swexplore"
-SG = HERE.parent.parent / "target" / "release" / "sg"
+# SEMGREP_BIN lets a probe run against a binary built elsewhere while
+# target/release is serving another eval - the bin identity is the caller's
+# responsibility to record either way.
+SG = pathlib.Path(os.environ.get("SEMGREP_BIN") or
+                  HERE.parent.parent / "target" / "release" / "sg")
 # Matches both hit-line forms: grep-style `path:41:text` (exact mode and
 # old captures) and the §34 unit-view header `path:41-58` (ranked mode
 # since the unit view shipped). group(1)/group(2) mean the same in both.
@@ -62,6 +66,13 @@ def main():
     ap.add_argument("--bucket", default="NEVER_SURFACED_W")
     ap.add_argument("-k", type=int, default=30)
     ap.add_argument("--flags", default="--chunking function --min-score 0.42")
+    ap.add_argument("--index-flags", default="--chunking function",
+                    help="re-index each checkout with these flags before "
+                         "querying. Surviving checkouts carry .semgrep dirs "
+                         "from whichever binary the campaign ran; a probe "
+                         "binary with new index-side behavior (§35.3's "
+                         "graph.bin) must rebuild or every query errors — "
+                         "the same staleness run.py's ensure_index guards")
     ap.add_argument("--out", required=True)
     args = ap.parse_args()
 
@@ -85,6 +96,10 @@ def main():
     try:
         for repo, rrows in sorted(by_repo.items()):
             env = dict(os.environ, SEMGREP_CACHE_DIR=str(cache))
+            if args.index_flags.strip():
+                subprocess.run([str(SG), "index", *args.index_flags.split()],
+                               cwd=repo, env=env, capture_output=True,
+                               timeout=1200, check=True)
             qcache = {}
             for q in sorted({q for r in rrows for q in r["wide_queries"]}):
                 p = subprocess.run([str(SG), q, *args.flags.split(),
