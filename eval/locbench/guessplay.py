@@ -526,8 +526,9 @@ def main():
                                         "start_line": h.get("start_line"),
                                         "end_line": h.get("end_line"),
                                         "features": h.get("features"),
-                                        "label_file": bool(golds) and
-                                            scoring.file_match(a.get("path", ""), golds),
+                                        "label_file": bool(
+                                            golds and
+                                            scoring.file_match(a.get("path", ""), golds)),
                                         # Single-hit calls into the two rank
                                         # functions ARE the per-hit matchers -
                                         # reusing them keeps the dump's labels
