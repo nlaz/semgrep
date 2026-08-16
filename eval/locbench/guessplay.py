@@ -100,7 +100,7 @@ def gid(row):
 
 
 def run_semgrep(tree, scope_rel, query, k, is_exact, mode, cache_dir,
-                search_flags=()):
+                search_flags=(), dump_features=False):
     path = tree if scope_rel in (None, ".") else tree / scope_rel
     cmd = [str(locbench.SEMGREP), "--json", "-k", str(k)]
     if is_exact:
@@ -110,6 +110,10 @@ def run_semgrep(tree, scope_rel, query, k, is_exact, mode, cache_dir,
     cmd += [query, str(path)]
     env = dict(os.environ)
     env["SEMGREP_CACHE_DIR"] = str(cache_dir)
+    if dump_features:
+        # The engine attaches a per-hit `features` object to its JSON
+        # (RESEARCH.md §35.2) - the checklist training dump.
+        env["SEMGREP_DUMP_FEATURES"] = "1"
     try:
         p = subprocess.run(cmd, capture_output=True, text=True, timeout=120, env=env)
     except subprocess.TimeoutExpired:
@@ -347,6 +351,12 @@ def main():
                          "an hours-long arm into ~10 minutes; blind to the "
                          "directory half by construction, so a candidate that "
                          "passes here still needs a full-corpus confirmation")
+    ap.add_argument("--dump-hits", type=Path, default=None,
+                    help="write one JSONL row per ranked invocation carrying "
+                         "every hit's engine features (SEMGREP_DUMP_FEATURES=1) "
+                         "plus per-hit gold labels - the §35.2 checklist "
+                         "training dump. Labels are computed here, while the "
+                         "worktree still exists")
     ap.add_argument("--extra-search-flags", default="",
                     help="space-separated flags appended to every ranked "
                          "search, on top of the config's own. The §24 factorial "
@@ -433,6 +443,7 @@ def main():
     cache_dir = Path(tmp.name)
 
     out_f = open(args.out, "a")
+    dump_f = open(args.dump_hits, "a") if args.dump_hits else None
     n_run = 0
     for n_i, inst_id in enumerate(instances, 1):
         inst = ds[inst_id]
@@ -497,7 +508,39 @@ def main():
                             hits, err = run_semgrep(
                                 tree, sc, query, args.k, is_exact, mode, cache_dir,
                                 search_flags=[*CONFIGS[config]["search"],
-                                              *arm_flags.split()])
+                                              *arm_flags.split()],
+                                dump_features=dump_f is not None and not is_exact)
+                            if dump_f is not None and not is_exact and hits:
+                                ah = _abs_hits(hits, sc, tree)
+                                dump_f.write(json.dumps({
+                                    "gid": gid(row), "instance_id": inst_id,
+                                    "kind": row["kind"],
+                                    "condition": row["condition"],
+                                    "mode": mode or "-", "config": config,
+                                    "scope_policy": policy, "scope": sc,
+                                    "query": query, "arm_flags": arm_flags,
+                                    "bin_sha256": BIN_SHA, "err": err,
+                                    "hits": [{
+                                        "pos": pos,
+                                        "path": a.get("path"),
+                                        "start_line": h.get("start_line"),
+                                        "end_line": h.get("end_line"),
+                                        "features": h.get("features"),
+                                        "label_file": bool(golds) and
+                                            scoring.file_match(a.get("path", ""), golds),
+                                        # Single-hit calls into the two rank
+                                        # functions ARE the per-hit matchers -
+                                        # reusing them keeps the dump's labels
+                                        # and the gate's metrics one
+                                        # implementation, and _SYMS makes the
+                                        # repeat parses free.
+                                        "label_func": bool(gold_funcs) and
+                                            rank_of_gold_func([a], gold_funcs, tree, sc) == 1,
+                                        "label_func_ovl": bool(gold_funcs) and
+                                            rank_of_gold_func_ovl([a], gold_funcs, tree, sc) == 1,
+                                    } for pos, (h, a) in enumerate(zip(hits, ah), 1)],
+                                }, sort_keys=True) + "\n")
+                                dump_f.flush()
                             out_f.write(json.dumps({
                                 "gid": gid(row), "instance_id": inst_id,
                                 "kind": row["kind"], "condition": row["condition"],
@@ -524,6 +567,8 @@ def main():
         if n_i % 5 == 0:
             print(f"  {n_i}/{len(instances)} instances, {n_run} arm-rows", flush=True)
     out_f.close()
+    if dump_f is not None:
+        dump_f.close()
     print(f"done: {n_run} new arm-rows in {args.out}")
 
 
